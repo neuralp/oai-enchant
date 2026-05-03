@@ -89,6 +89,13 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
         app.selection = Selection::Info;
     }
 
+    if ui
+        .selectable_label(app.selection == Selection::ExternalDocs, RichText::new("External Docs").strong())
+        .clicked()
+    {
+        app.selection = Selection::ExternalDocs;
+    }
+
     // ── Servers ───────────────────────────────────────────────────────────────
     let server_hdr = RichText::new(format!("Servers  ({})", data.server_labels.len())).strong();
     egui::CollapsingHeader::new(server_hdr)

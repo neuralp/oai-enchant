@@ -12,6 +12,24 @@ pub fn show(
     selection: &Selection,
     new_item: &mut NewItemBuffers,
 ) -> bool {
+    // Cache component ref paths for pickers used throughout the sub-editors.
+    {
+        let comps = spec.components.as_ref();
+        let mk = |prefix: &str, keys: Vec<&str>| -> Vec<String> {
+            keys.into_iter().map(|k| format!("{prefix}{k}")).collect()
+        };
+        let schema_refs = comps.map(|c| mk("#/components/schemas/", c.schemas.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        let param_refs  = comps.map(|c| mk("#/components/parameters/", c.parameters.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        let resp_refs   = comps.map(|c| mk("#/components/responses/", c.responses.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        let rb_refs     = comps.map(|c| mk("#/components/requestBodies/", c.request_bodies.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        ui.data_mut(|d| {
+            d.insert_temp(egui::Id::new("oa_schema_refs"), schema_refs);
+            d.insert_temp(egui::Id::new("oa_param_refs"),  param_refs);
+            d.insert_temp(egui::Id::new("oa_resp_refs"),   resp_refs);
+            d.insert_temp(egui::Id::new("oa_rb_refs"),     rb_refs);
+        });
+    }
+
     let mut changed = false;
     ScrollArea::vertical().id_salt("editor_scroll").show(ui, |ui| {
         ui.add_space(4.0);
@@ -61,9 +79,6 @@ pub fn show(
                 let name = name.clone();
                 changed = edit_security_scheme_by_name(ui, spec, &name);
             }
-            Selection::Link(_) => {
-                ui.label("Link editing not yet implemented.");
-            }
         }
     });
     changed
@@ -105,12 +120,14 @@ fn row_opt_multiline(ui: &mut Ui, label: &str, val: &mut Option<String>) -> bool
 fn row_opt_bool(ui: &mut Ui, label: &str, val: &mut Option<bool>) -> bool {
     ui.label(label);
     let mut b = val.unwrap_or(false);
-    let r = ui.checkbox(&mut b, "").changed();
+    let r = toggle_switch(ui, &mut b);
     ui.end_row();
-    if r {
+    if r.changed() {
         *val = Some(b);
+        true
+    } else {
+        false
     }
-    r
 }
 
 fn row_opt_u64(ui: &mut Ui, label: &str, val: &mut Option<u64>) -> bool {
@@ -133,6 +150,128 @@ fn row_opt_f64(ui: &mut Ui, label: &str, val: &mut Option<f64>) -> bool {
         *val = s.parse().ok();
     }
     r
+}
+
+fn toggle_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
+    let size = egui::vec2(36.0, 20.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool(response.id, *on);
+        let off = ui.visuals().widgets.inactive.bg_fill;
+        let on_c = ui.visuals().selection.bg_fill;
+        let bg = egui::Color32::from_rgb(
+            (off.r() as f32 + (on_c.r() as f32 - off.r() as f32) * t) as u8,
+            (off.g() as f32 + (on_c.g() as f32 - off.g() as f32) * t) as u8,
+            (off.b() as f32 + (on_c.b() as f32 - off.b() as f32) * t) as u8,
+        );
+        ui.painter().rect_filled(rect, size.y / 2.0, bg);
+        let r = size.y / 2.0 - 2.0;
+        let cx = egui::lerp((rect.left() + r + 2.0)..=(rect.right() - r - 2.0), t);
+        ui.painter().circle_filled(egui::pos2(cx, rect.center().y), r, egui::Color32::WHITE);
+    }
+    response
+}
+
+/// Edit an Option<Value> as a plain text field. String values shown without JSON quotes.
+fn opt_json_field(ui: &mut Ui, val: &mut Option<Value>, width: f32, hint: &str) -> bool {
+    let mut s = match val.as_ref() {
+        None => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => serde_json::to_string(v).unwrap_or_default(),
+    };
+    let r = ui.add(egui::TextEdit::singleline(&mut s).desired_width(width).hint_text(hint)).changed();
+    if r {
+        *val = if s.is_empty() {
+            None
+        } else {
+            serde_json::from_str(&s).ok().or_else(|| Some(Value::String(s.clone())))
+        };
+    }
+    r
+}
+
+/// Edit an exclusive bound (OAS 3.0 bool or 3.1 number) as a plain text field.
+fn excl_bound_field(ui: &mut Ui, val: &mut Option<Value>, width: f32, hint: &str) -> bool {
+    let mut s = match val.as_ref() {
+        None => String::new(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        Some(v) => serde_json::to_string(v).unwrap_or_default(),
+    };
+    let r = ui.add(egui::TextEdit::singleline(&mut s).desired_width(width).hint_text(hint)).changed();
+    if r {
+        *val = if s.is_empty() {
+            None
+        } else if let Ok(n) = s.parse::<f64>() {
+            serde_json::Number::from_f64(n).map(Value::Number)
+        } else if let Ok(b) = s.parse::<bool>() {
+            Some(Value::Bool(b))
+        } else {
+            None
+        };
+    }
+    r
+}
+
+/// Text field + dropdown picker for a $ref value.
+/// `refs_key` is the egui temp-data key holding a `Vec<String>` of candidate paths.
+/// Returns true if the value changed.
+fn ref_picker(ui: &mut Ui, ref_val: &mut Option<String>, combo_id: egui::Id, refs_key: egui::Id) -> bool {
+    let mut r = ref_val.clone().unwrap_or_default();
+    let refs: Vec<String> = ui.data(|d| d.get_temp::<Vec<String>>(refs_key).unwrap_or_default());
+    let mut ch = false;
+
+    if ui
+        .add(egui::TextEdit::singleline(&mut r).desired_width(200.0).hint_text("#/components/…"))
+        .changed()
+    {
+        *ref_val = if r.is_empty() { None } else { Some(r.clone()) };
+        ch = true;
+    }
+
+    if !refs.is_empty() {
+        let selected_name = refs
+            .iter()
+            .find(|p| **p == r)
+            .and_then(|p| p.split('/').last())
+            .unwrap_or("pick…");
+        egui::ComboBox::from_id_salt(combo_id)
+            .selected_text(selected_name)
+            .show_ui(ui, |ui| {
+                // empty / clear option
+                if ui.selectable_label(r.is_empty(), "— clear —").clicked() {
+                    *ref_val = None;
+                    ch = true;
+                }
+                for ref_path in &refs {
+                    let name = ref_path.split('/').last().unwrap_or(ref_path.as_str());
+                    if ui.selectable_label(r == *ref_path, name).clicked() {
+                        *ref_val = Some(ref_path.clone());
+                        ch = true;
+                    }
+                }
+            });
+    }
+    ch
+}
+
+fn format_options(type_str: &str) -> &'static [&'static str] {
+    match type_str {
+        "string" => &[
+            "", "date", "date-time", "time", "duration",
+            "email", "idn-email", "hostname", "idn-hostname",
+            "ipv4", "ipv6", "uri", "uri-reference", "iri", "iri-reference",
+            "uuid", "uri-template", "json-pointer", "relative-json-pointer",
+            "regex", "byte", "binary", "password",
+        ],
+        "number"  => &["", "float", "double"],
+        "integer" => &["", "int32", "int64"],
+        _         => &[""],
+    }
 }
 
 fn section_header(ui: &mut Ui, label: &str) {
@@ -424,8 +563,25 @@ fn edit_operation(
         ui.add(
             egui::TextEdit::singleline(&mut new_item.parameter_name)
                 .hint_text("$ref path…")
-                .desired_width(180.0),
+                .desired_width(160.0),
         );
+        // Dropdown picker for existing component parameters
+        let param_refs: Vec<String> = ui.data(|d| d.get_temp(egui::Id::new("oa_param_refs")).unwrap_or_default());
+        if !param_refs.is_empty() {
+            let cur = new_item.parameter_name.clone();
+            let sel_name = param_refs.iter().find(|p| **p == cur)
+                .and_then(|p| p.split('/').last()).unwrap_or("pick…");
+            egui::ComboBox::from_id_salt("op_param_ref_pick")
+                .selected_text(sel_name)
+                .show_ui(ui, |ui| {
+                    for ref_path in &param_refs {
+                        let name = ref_path.split('/').last().unwrap_or(ref_path.as_str());
+                        if ui.selectable_label(cur == *ref_path, name).clicked() {
+                            new_item.parameter_name = ref_path.clone();
+                        }
+                    }
+                });
+        }
         if ui.small_button("＋ Add $ref").clicked() && !new_item.parameter_name.is_empty() {
             let r = new_item.parameter_name.clone();
             new_item.parameter_name.clear();
@@ -660,69 +816,115 @@ fn edit_response_item(ui: &mut Ui, resp: &mut Response, id: &str) -> bool {
 
 // ── Schema editors ────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SchemaMode { Regular, Composition }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompKind { AllOf, AnyOf, OneOf }
+
+impl CompKind {
+    fn label(self) -> &'static str {
+        match self { Self::AllOf => "allOf", Self::AnyOf => "anyOf", Self::OneOf => "oneOf" }
+    }
+}
+
 fn edit_schema_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
     ui.heading(format!("Schema: {name}"));
     ui.add_space(4.0);
-
-    let Some(comps) = spec.components.as_mut() else {
-        ui.label("No components.");
-        return false;
-    };
-    let Some(schema_ref) = comps.schemas.get_mut(name) else {
-        ui.label("Schema not found.");
-        return false;
-    };
-
+    let Some(comps) = spec.components.as_mut() else { ui.label("No components."); return false };
+    let Some(schema_ref) = comps.schemas.get_mut(name) else { ui.label("Schema not found."); return false };
     match schema_ref {
-        RefOr::Ref(r) => {
-            ui.label(format!("$ref: {}", r.ref_));
-            false
-        }
+        RefOr::Ref(r) => { ui.label(format!("$ref: {}", r.ref_)); false }
         RefOr::Item(schema) => edit_schema_inline(ui, schema, name, 0),
     }
 }
 
-/// Edit a schema inline. `depth` limits property nesting depth.
+/// Edit a schema inline. `depth` limits nesting depth for nested properties.
 pub fn edit_schema_inline(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32) -> bool {
     let mut ch = false;
 
-    // $ref
+    // ── $ref shortcut ─────────────────────────────────────────────────────────
     if schema.ref_.is_some() {
-        ch |= form_grid(ui, &format!("{id}_ref_grid"), |ui| {
-            let mut r = schema.ref_.clone().unwrap_or_default();
+        ui.horizontal(|ui| {
             ui.label("$ref:");
-            let changed = ui.text_edit_singleline(&mut r).changed();
-            ui.end_row();
-            if changed {
-                schema.ref_ = if r.is_empty() { None } else { Some(r) };
-            }
-            changed
+            ch |= ref_picker(
+                ui, &mut schema.ref_,
+                egui::Id::new(format!("{id}__ref_pick")),
+                egui::Id::new("oa_schema_refs"),
+            );
+            if ui.small_button("✕").clicked() { schema.ref_ = None; ch = true; }
         });
         return ch;
     }
 
-    ch |= form_grid(ui, &format!("{id}_base_grid"), |ui| {
+    // ── Common fields (title + description, visible in both modes) ─────────────
+    ch |= form_grid(ui, &format!("{id}__common"), |ui| {
         let mut c = false;
         c |= row_opt_str(ui, "Title:", &mut schema.title);
-        c |= row_opt_str(ui, "Description:", &mut schema.description);
+        c |= row_opt_multiline(ui, "Description:", &mut schema.description);
+        c
+    });
 
-        // Type dropdown (common 3.0/3.1 types)
+    // ── Mode selector ─────────────────────────────────────────────────────────
+    let has_comp = !schema.all_of.is_empty() || !schema.any_of.is_empty() || !schema.one_of.is_empty();
+    let mode_id = egui::Id::new(format!("{id}__mode"));
+    let mut mode: SchemaMode = ui.data(|d| {
+        d.get_temp(mode_id)
+            .unwrap_or(if has_comp { SchemaMode::Composition } else { SchemaMode::Regular })
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Model type:").strong());
+        if ui.selectable_label(mode == SchemaMode::Regular, "  Regular  ").clicked() {
+            mode = SchemaMode::Regular;
+        }
+        if ui.selectable_label(mode == SchemaMode::Composition, "  Composition  ").clicked() {
+            mode = SchemaMode::Composition;
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(mode_id, mode));
+    ui.separator();
+
+    match mode {
+        SchemaMode::Regular     => ch |= edit_schema_regular(ui, schema, id, depth),
+        SchemaMode::Composition => ch |= edit_schema_composition(ui, schema, id, depth),
+    }
+    ch
+}
+
+// ── Regular model ─────────────────────────────────────────────────────────────
+
+fn edit_schema_regular(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32) -> bool {
+    let mut ch = false;
+
+    // Type + flags
+    ch |= form_grid(ui, &format!("{id}__base"), |ui| {
+        let mut c = false;
         let mut type_str = schema.type_str().to_string();
         ui.label("Type:");
-        egui::ComboBox::from_id_salt(format!("{id}_type"))
+        egui::ComboBox::from_id_salt(format!("{id}__type"))
             .selected_text(type_str.as_str())
             .show_ui(ui, |ui| {
-                for t in ["","string","number","integer","boolean","array","object","null"] {
-                    if ui.selectable_label(type_str == t, t).clicked() {
-                        type_str = t.to_string();
+                for t in ["", "string", "number", "integer", "boolean", "array", "object", "null"] {
+                    if ui.selectable_label(type_str == t, t).clicked() { type_str = t.to_string(); c = true; }
+                }
+            });
+        ui.end_row();
+        if c { schema.set_type_str(&type_str); }
+        ui.label("Format:");
+        let cur_fmt = schema.format.clone().unwrap_or_default();
+        egui::ComboBox::from_id_salt(format!("{id}__fmt"))
+            .selected_text(cur_fmt.as_str())
+            .show_ui(ui, |ui| {
+                for &opt in format_options(&type_str) {
+                    if ui.selectable_label(cur_fmt == opt, opt).clicked() {
+                        schema.format = if opt.is_empty() { None } else { Some(opt.to_string()) };
                         c = true;
                     }
                 }
             });
         ui.end_row();
-        if c { schema.set_type_str(&type_str); }
-
-        c |= row_opt_str(ui, "Format:", &mut schema.format);
         c |= row_opt_bool(ui, "Nullable (3.0):", &mut schema.nullable);
         c |= row_opt_bool(ui, "Read Only:", &mut schema.read_only);
         c |= row_opt_bool(ui, "Write Only:", &mut schema.write_only);
@@ -732,196 +934,504 @@ pub fn edit_schema_inline(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32
 
     let type_str = schema.type_str().to_string();
 
-    // String constraints
+    // String constraints (always visible when relevant)
     if type_str == "string" || type_str.is_empty() {
-        egui::CollapsingHeader::new("String Constraints")
-            .id_salt(format!("{id}_str_constraints"))
-            .show(ui, |ui| {
-                ch |= form_grid(ui, &format!("{id}_str_grid"), |ui| {
-                    let mut c = false;
-                    c |= row_opt_u64(ui, "Min Length:", &mut schema.min_length);
-                    c |= row_opt_u64(ui, "Max Length:", &mut schema.max_length);
-                    c |= row_opt_str(ui, "Pattern:", &mut schema.pattern);
-                    c
-                });
-            });
+        section_header(ui, "String Constraints");
+        ch |= form_grid(ui, &format!("{id}__str"), |ui| {
+            let mut c = false;
+            c |= row_opt_u64(ui, "Min Length:", &mut schema.min_length);
+            c |= row_opt_u64(ui, "Max Length:", &mut schema.max_length);
+            c |= row_opt_str(ui, "Pattern:", &mut schema.pattern);
+            c
+        });
     }
 
     // Number constraints
     if type_str == "number" || type_str == "integer" {
-        egui::CollapsingHeader::new("Number Constraints")
-            .id_salt(format!("{id}_num_constraints"))
-            .show(ui, |ui| {
-                ch |= form_grid(ui, &format!("{id}_num_grid"), |ui| {
-                    let mut c = false;
-                    c |= row_opt_f64(ui, "Minimum:", &mut schema.minimum);
-                    c |= row_opt_f64(ui, "Maximum:", &mut schema.maximum);
-                    c |= row_opt_f64(ui, "Multiple Of:", &mut schema.multiple_of);
-                    c
-                });
-            });
+        section_header(ui, "Number Constraints");
+        ch |= form_grid(ui, &format!("{id}__num"), |ui| {
+            let mut c = false;
+            c |= row_opt_f64(ui, "Minimum:", &mut schema.minimum);
+            c |= row_opt_f64(ui, "Maximum:", &mut schema.maximum);
+            c |= row_opt_f64(ui, "Multiple Of:", &mut schema.multiple_of);
+            c
+        });
     }
 
-    // Array constraints
+    // Array
     if type_str == "array" {
-        egui::CollapsingHeader::new("Array Constraints")
-            .id_salt(format!("{id}_arr_constraints"))
-            .default_open(true)
-            .show(ui, |ui| {
-                ch |= form_grid(ui, &format!("{id}_arr_grid"), |ui| {
-                    let mut c = false;
-                    c |= row_opt_u64(ui, "Min Items:", &mut schema.min_items);
-                    c |= row_opt_u64(ui, "Max Items:", &mut schema.max_items);
-                    c |= row_opt_bool(ui, "Unique Items:", &mut schema.unique_items);
-                    c
-                });
-
-                if depth < 3 {
-                    ui.label("Items Schema:");
-                    let items = schema.items.get_or_insert_with(|| Box::new(Schema::default()));
-                    ch |= edit_schema_inline(ui, items, &format!("{id}_items"), depth + 1);
-                } else {
-                    ui.label(RichText::new("(max nesting depth reached)").weak());
-                }
+        section_header(ui, "Array");
+        ch |= form_grid(ui, &format!("{id}__arr"), |ui| {
+            let mut c = false;
+            c |= row_opt_u64(ui, "Min Items:", &mut schema.min_items);
+            c |= row_opt_u64(ui, "Max Items:", &mut schema.max_items);
+            c |= row_opt_bool(ui, "Unique Items:", &mut schema.unique_items);
+            c
+        });
+        if depth < 3 {
+            ui.label(RichText::new("Items schema:").strong());
+            ui.indent(format!("{id}__items_indent"), |ui| {
+                let items = schema.items.get_or_insert_with(|| Box::new(Schema::default()));
+                ch |= edit_schema_inline(ui, items, &format!("{id}__items"), depth + 1);
             });
+        }
     }
 
-    // Object properties
+    // Properties (always fully expanded — no collapsing header)
     if type_str == "object" || !schema.properties.is_empty() {
-        egui::CollapsingHeader::new("Properties")
-            .id_salt(format!("{id}_props"))
-            .default_open(true)
-            .show(ui, |ui| {
-                ch |= form_grid(ui, &format!("{id}_obj_grid"), |ui| {
-                    let mut c = false;
-                    c |= row_opt_u64(ui, "Min Properties:", &mut schema.min_properties);
-                    c |= row_opt_u64(ui, "Max Properties:", &mut schema.max_properties);
-                    c
-                });
-
-                let prop_keys: Vec<String> = schema.properties.keys().cloned().collect();
-                let mut to_remove: Option<String> = None;
-
-                for prop_name in &prop_keys {
-                    let is_required = schema.required.contains(prop_name);
-                    let req_label = if is_required { "* " } else { "  " };
-
-                    if let Some(prop_schema) = schema.properties.get_mut(prop_name) {
-                        let ptype = prop_schema.type_str().to_string();
-                        let hdr = format!("{req_label}{prop_name}: {ptype}");
-                        egui::CollapsingHeader::new(RichText::new(&hdr).monospace())
-                            .id_salt(format!("{id}_prop_{prop_name}"))
-                            .show(ui, |ui| {
-                                if depth < 3 {
-                                    ch |= edit_schema_inline(
-                                        ui, prop_schema,
-                                        &format!("{id}_prop_{prop_name}_schema"),
-                                        depth + 1,
-                                    );
-                                }
-                                ui.horizontal(|ui| {
-                                    let mut req = is_required;
-                                    if ui.checkbox(&mut req, "Required").changed() {
-                                        if req {
-                                            if !schema.required.contains(prop_name) {
-                                                schema.required.push(prop_name.clone());
-                                            }
-                                        } else {
-                                            schema.required.retain(|r| r != prop_name);
-                                        }
-                                        ch = true;
-                                    }
-                                    if ui.small_button("🗑 Remove").clicked() {
-                                        to_remove = Some(prop_name.clone());
-                                    }
-                                });
-                            });
-                    }
-                }
-
-                if let Some(k) = to_remove {
-                    schema.properties.shift_remove(&k);
-                    schema.required.retain(|r| *r != k);
-                    ch = true;
-                }
-
-                // Add property
-                ui.horizontal(|ui| {
-                    let buf_id = egui::Id::new(format!("{id}_new_prop"));
-                    let mut buf: String = ui.data_mut(|d| d.get_temp::<String>(buf_id).unwrap_or_default());
-                    ui.add(egui::TextEdit::singleline(&mut buf).hint_text("property name").desired_width(140.0));
-                    ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-                    if ui.small_button("＋").clicked() && !buf.is_empty() {
-                        schema.properties.insert(buf.clone(), Box::new(Schema::default()));
-                        ui.data_mut(|d| d.insert_temp(buf_id, String::new()));
-                        ch = true;
-                    }
-                });
-            });
+        section_header(ui, "Properties");
+        ch |= edit_schema_properties_flat(ui, schema, id, depth);
     }
 
     // Enum values
-    egui::CollapsingHeader::new("Enum Values")
-        .id_salt(format!("{id}_enum"))
-        .show(ui, |ui| {
-            let enum_str = schema.enum_.as_deref()
-                .map(|vals| vals.iter().map(|v| serde_json::to_string(v).unwrap_or_default()).collect::<Vec<_>>().join("\n"))
-                .unwrap_or_default();
-            let mut s = enum_str;
-            ui.label(RichText::new("One value per line (JSON format):").weak().small());
-            if ui.add(egui::TextEdit::multiline(&mut s).desired_rows(4).desired_width(f32::INFINITY)).changed() {
-                let vals: Vec<Value> = s.lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .filter_map(|l| serde_json::from_str(l).ok())
-                    .collect();
-                schema.enum_ = if vals.is_empty() { None } else { Some(vals) };
-                ch = true;
-            }
-        });
-
-    // Composition (allOf / anyOf / oneOf)
-    if !schema.all_of.is_empty() || !schema.any_of.is_empty() || !schema.one_of.is_empty() || depth == 0 {
-        egui::CollapsingHeader::new("Composition (allOf / anyOf / oneOf)")
-            .id_salt(format!("{id}_composition"))
-            .show(ui, |ui| {
-                ch |= edit_schema_list(ui, "allOf", &mut schema.all_of, &format!("{id}_allof"), depth);
-                ch |= edit_schema_list(ui, "anyOf", &mut schema.any_of, &format!("{id}_anyof"), depth);
-                ch |= edit_schema_list(ui, "oneOf", &mut schema.one_of, &format!("{id}_oneof"), depth);
-            });
+    section_header(ui, "Enum Values");
+    let mut enum_str = schema.enum_.as_deref()
+        .map(|vals| vals.iter().map(|v| serde_json::to_string(v).unwrap_or_default()).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default();
+    ui.label(RichText::new("One JSON value per line (blank = no enum restriction):").weak().small());
+    if ui.add(egui::TextEdit::multiline(&mut enum_str).desired_rows(3).desired_width(f32::INFINITY)).changed() {
+        let vals: Vec<Value> = enum_str.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        schema.enum_ = if vals.is_empty() { None } else { Some(vals) };
+        ch = true;
     }
 
     ch
 }
 
-fn edit_schema_list(ui: &mut Ui, label: &str, list: &mut Vec<Box<Schema>>, id: &str, depth: u32) -> bool {
-    let mut ch = false;
-    ui.label(RichText::new(label).strong());
-    let mut to_remove: Option<usize> = None;
+// ── Flat property list (no collapsing headers per property) ───────────────────
 
-    for (i, schema) in list.iter_mut().enumerate() {
-        egui::CollapsingHeader::new(
-            schema.ref_.as_deref().map(|r| format!("$ref: {r}")).unwrap_or_else(|| format!("(schema {i})"))
-        )
-        .id_salt(format!("{id}_{i}"))
-        .show(ui, |ui| {
-            if depth < 2 {
-                ch |= edit_schema_inline(ui, schema, &format!("{id}_{i}_inner"), depth + 1);
+fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32) -> bool {
+    let mut ch = false;
+
+    ch |= form_grid(ui, &format!("{id}__obj_meta"), |ui| {
+        let mut c = false;
+        c |= row_opt_u64(ui, "Min Properties:", &mut schema.min_properties);
+        c |= row_opt_u64(ui, "Max Properties:", &mut schema.max_properties);
+        c
+    });
+
+    let prop_keys: Vec<String> = schema.properties.keys().cloned().collect();
+    let mut to_remove: Option<String> = None;
+    let mut rename_op: Option<(String, String)> = None;
+
+    for prop_name in &prop_keys {
+        // Collect state before borrowing properties mutably.
+        let is_required = schema.required.contains(prop_name);
+        let mut new_required = is_required;
+        let mut do_remove = false;
+        let mut rename_to: Option<String> = None;
+
+        if let Some(prop_schema) = schema.properties.get_mut(prop_name) {
+            ui.group(|ui| {
+                // Row 1: name | type | Req toggle | Dep toggle | delete
+                ui.horizontal(|ui| {
+                    let nbuf_id = egui::Id::new(format!("{id}__pname__{prop_name}"));
+                    let mut nbuf: String = ui.data(|d| {
+                        d.get_temp(nbuf_id).unwrap_or_else(|| prop_name.clone())
+                    });
+                    let nresp = ui.add(
+                        egui::TextEdit::singleline(&mut nbuf)
+                            .desired_width(120.0)
+                            .hint_text("name"),
+                    );
+                    ui.data_mut(|d| d.insert_temp(nbuf_id, nbuf.clone()));
+                    if nresp.lost_focus() && !nbuf.is_empty() && nbuf != *prop_name {
+                        rename_to = Some(nbuf);
+                    }
+
+                    ui.label("Type:");
+                    let mut type_str = prop_schema.type_str().to_string();
+                    let mut type_changed = false;
+                    egui::ComboBox::from_id_salt(format!("{id}__ptype__{prop_name}"))
+                        .selected_text(type_str.as_str())
+                        .width(88.0)
+                        .show_ui(ui, |ui| {
+                            for t in ["", "string", "number", "integer", "boolean", "array", "object", "null"] {
+                                if ui.selectable_label(type_str == t, t).clicked() {
+                                    type_str = t.to_string();
+                                    type_changed = true;
+                                }
+                            }
+                        });
+                    if type_changed { prop_schema.set_type_str(&type_str); ch = true; }
+
+                    ui.label("Req:");
+                    toggle_switch(ui, &mut new_required); // deferred apply below
+
+                    ui.label("Dep:");
+                    let mut dep = prop_schema.deprecated.unwrap_or(false);
+                    if toggle_switch(ui, &mut dep).changed() {
+                        prop_schema.deprecated = Some(dep);
+                        ch = true;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("🗑").clicked() { do_remove = true; }
+                    });
+                });
+
+                // Row 2: description
+                ui.horizontal(|ui| {
+                    ui.label("Desc:");
+                    let mut desc = prop_schema.description.clone().unwrap_or_default();
+                    if ui.add(
+                        egui::TextEdit::singleline(&mut desc)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("description"),
+                    ).changed() {
+                        prop_schema.description = if desc.is_empty() { None } else { Some(desc) };
+                        ch = true;
+                    }
+                });
+
+                let ptype = prop_schema.type_str().to_string();
+
+                // String-specific fields
+                if ptype == "string" {
+                    ui.horizontal(|ui| {
+                        ui.label("Format:");
+                        let cur_fmt = prop_schema.format.clone().unwrap_or_default();
+                        egui::ComboBox::from_id_salt(format!("{id}__pfmt__{prop_name}"))
+                            .selected_text(cur_fmt.as_str())
+                            .width(130.0)
+                            .show_ui(ui, |ui| {
+                                for &opt in format_options("string") {
+                                    if ui.selectable_label(cur_fmt == opt, opt).clicked() {
+                                        prop_schema.format = if opt.is_empty() { None } else { Some(opt.to_string()) };
+                                        ch = true;
+                                    }
+                                }
+                            });
+                        ui.label("Pattern:");
+                        let mut pat = prop_schema.pattern.clone().unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut pat).desired_width(110.0)).changed() {
+                            prop_schema.pattern = if pat.is_empty() { None } else { Some(pat) };
+                            ch = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Default:");
+                        if opt_json_field(ui, &mut prop_schema.default, 100.0, "value") { ch = true; }
+                        ui.label("Example:");
+                        if opt_json_field(ui, &mut prop_schema.example, 100.0, "value") { ch = true; }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("MinLen:");
+                        let mut s = prop_schema.min_length.map(|v| v.to_string()).unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(50.0)).changed() {
+                            prop_schema.min_length = s.parse().ok();
+                            ch = true;
+                        }
+                        ui.label("MaxLen:");
+                        let mut s = prop_schema.max_length.map(|v| v.to_string()).unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(50.0)).changed() {
+                            prop_schema.max_length = s.parse().ok();
+                            ch = true;
+                        }
+                    });
+                }
+
+                // Number/Integer-specific fields
+                if ptype == "number" || ptype == "integer" {
+                    ui.horizontal(|ui| {
+                        ui.label("Format:");
+                        let cur_fmt = prop_schema.format.clone().unwrap_or_default();
+                        egui::ComboBox::from_id_salt(format!("{id}__pfmt__{prop_name}"))
+                            .selected_text(cur_fmt.as_str())
+                            .width(80.0)
+                            .show_ui(ui, |ui| {
+                                for &opt in format_options(&ptype) {
+                                    if ui.selectable_label(cur_fmt == opt, opt).clicked() {
+                                        prop_schema.format = if opt.is_empty() { None } else { Some(opt.to_string()) };
+                                        ch = true;
+                                    }
+                                }
+                            });
+                        ui.label("MultipleOf:");
+                        let mut s = prop_schema.multiple_of.map(|v| v.to_string()).unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(60.0)).changed() {
+                            prop_schema.multiple_of = s.parse().ok();
+                            ch = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Default:");
+                        if opt_json_field(ui, &mut prop_schema.default, 80.0, "value") { ch = true; }
+                        ui.label("Example:");
+                        if opt_json_field(ui, &mut prop_schema.example, 80.0, "value") { ch = true; }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Min:");
+                        let mut s = prop_schema.minimum.map(|v| v.to_string()).unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(55.0)).changed() {
+                            prop_schema.minimum = s.parse().ok();
+                            ch = true;
+                        }
+                        ui.label("Max:");
+                        let mut s = prop_schema.maximum.map(|v| v.to_string()).unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(55.0)).changed() {
+                            prop_schema.maximum = s.parse().ok();
+                            ch = true;
+                        }
+                        ui.label("ExclMin:");
+                        if excl_bound_field(ui, &mut prop_schema.exclusive_minimum, 55.0, "number") { ch = true; }
+                        ui.label("ExclMax:");
+                        if excl_bound_field(ui, &mut prop_schema.exclusive_maximum, 55.0, "number") { ch = true; }
+                    });
+                }
+
+                // Array
+                if ptype == "array" {
+                    ui.horizontal(|ui| {
+                        ui.label("Items:");
+                        let items = prop_schema.items.get_or_insert_with(|| Box::new(Schema::default()));
+                        ch |= ref_picker(
+                            ui, &mut items.ref_,
+                            egui::Id::new(format!("{id}__pitems_ref__{prop_name}")),
+                            egui::Id::new("oa_schema_refs"),
+                        );
+                    });
+                    // Show type combo only when no $ref is set
+                    let items_has_ref = prop_schema.items.as_ref().map(|i| i.ref_.is_some()).unwrap_or(false);
+                    if !items_has_ref {
+                        ui.horizontal(|ui| {
+                            ui.label("Items type:");
+                            let items = prop_schema.items.get_or_insert_with(|| Box::new(Schema::default()));
+                            let mut it = items.type_str().to_string();
+                            let mut it_changed = false;
+                            egui::ComboBox::from_id_salt(format!("{id}__pitems_type__{prop_name}"))
+                                .selected_text(&it).width(100.0)
+                                .show_ui(ui, |ui| {
+                                    for t in ["", "string", "number", "integer", "boolean", "object"] {
+                                        if ui.selectable_label(it == t, t).clicked() { it = t.to_string(); it_changed = true; }
+                                    }
+                                });
+                            if it_changed { items.set_type_str(&it); ch = true; }
+                        });
+                    }
+                }
+
+                // Nested object properties (depth-limited)
+                if ptype == "object" && depth < 2 {
+                    ui.separator();
+                    ui.label(RichText::new("Nested properties:").small().strong());
+                    ch |= edit_schema_properties_flat(
+                        ui, prop_schema,
+                        &format!("{id}__nested__{prop_name}"),
+                        depth + 1,
+                    );
+                }
+            }); // end group (prop_schema borrow released)
+            ui.add_space(2.0);
+        }
+
+        // Apply deferred mutations now that schema is fully unborrowed ─────────
+        if new_required != is_required {
+            if new_required { if !schema.required.contains(prop_name) { schema.required.push(prop_name.clone()); } }
+            else { schema.required.retain(|r| r != prop_name); }
+            ch = true;
+        }
+        if do_remove { to_remove = Some(prop_name.clone()); }
+        if let Some(nn) = rename_to {
+            if !schema.properties.contains_key(&nn) { rename_op = Some((prop_name.clone(), nn)); }
+        }
+    }
+
+    if let Some(k) = to_remove {
+        schema.properties.shift_remove(&k);
+        schema.required.retain(|r| *r != k);
+        ch = true;
+    }
+    if let Some((old, new_name)) = rename_op {
+        if let Some(val) = schema.properties.shift_remove(&old) {
+            schema.properties.insert(new_name.clone(), val);
+            if let Some(pos) = schema.required.iter().position(|r| r == &old) {
+                schema.required[pos] = new_name;
             }
-            if ui.small_button("🗑 Remove").clicked() {
-                to_remove = Some(i);
+            ch = true;
+        }
+    }
+
+    // Add property row
+    ui.horizontal(|ui| {
+        let buf_id = egui::Id::new(format!("{id}__new_prop"));
+        let mut buf: String = ui.data_mut(|d| d.get_temp(buf_id).unwrap_or_default());
+        ui.add(egui::TextEdit::singleline(&mut buf).hint_text("new property name").desired_width(150.0));
+        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+        if ui.button("＋ Add Property").clicked() && !buf.is_empty() {
+            schema.properties.insert(buf.clone(), Box::new(Schema::default()));
+            ui.data_mut(|d| d.insert_temp(buf_id, String::new()));
+            ch = true;
+        }
+    });
+
+    ch
+}
+
+// ── Composition model ─────────────────────────────────────────────────────────
+
+fn edit_schema_composition(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32) -> bool {
+    let mut ch = false;
+
+    // Discriminator (optional — only relevant for composition)
+    {
+        let disc = schema.discriminator.get_or_insert_with(Discriminator::default);
+        let mut pname = disc.property_name.clone();
+        ui.horizontal(|ui| {
+            ui.label("Discriminator property name:");
+            if ui.add(egui::TextEdit::singleline(&mut pname).hint_text("optional").desired_width(160.0)).changed() {
+                disc.property_name = pname.clone();
+                ch = true;
             }
         });
+        if schema.discriminator.as_ref().map(|d| d.property_name.is_empty()).unwrap_or(false) {
+            schema.discriminator = None;
+        }
+    }
+
+    ui.add_space(6.0);
+
+    // ── Composition type radio ─────────────────────────────────────────────────
+    let comp_id = egui::Id::new(format!("{id}__comp_kind"));
+    let inferred = if !schema.all_of.is_empty() { CompKind::AllOf }
+        else if !schema.any_of.is_empty() { CompKind::AnyOf }
+        else { CompKind::OneOf };
+    let mut comp_kind: CompKind = ui.data(|d| d.get_temp(comp_id).unwrap_or(inferred));
+    let prev_kind = comp_kind;
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Composition type:").strong());
+        ui.radio_value(&mut comp_kind, CompKind::AllOf, "allOf");
+        ui.radio_value(&mut comp_kind, CompKind::AnyOf, "anyOf");
+        ui.radio_value(&mut comp_kind, CompKind::OneOf, "oneOf");
+    });
+    ui.data_mut(|d| d.insert_temp(comp_id, comp_kind));
+
+    // Migrate entries when composition type changes
+    if comp_kind != prev_kind {
+        let entries = match prev_kind {
+            CompKind::AllOf => std::mem::take(&mut schema.all_of),
+            CompKind::AnyOf => std::mem::take(&mut schema.any_of),
+            CompKind::OneOf => std::mem::take(&mut schema.one_of),
+        };
+        match comp_kind {
+            CompKind::AllOf => schema.all_of.extend(entries),
+            CompKind::AnyOf => schema.any_of.extend(entries),
+            CompKind::OneOf => schema.one_of.extend(entries),
+        }
+        ch = true;
+    }
+
+    ui.separator();
+    ui.label(RichText::new(format!("Entries — {}:", comp_kind.label())).strong());
+    ui.add_space(4.0);
+
+    // ── Entry list ────────────────────────────────────────────────────────────
+    // Determine which list is active, iterate by index to avoid borrow conflicts.
+    let list_len = match comp_kind {
+        CompKind::AllOf => schema.all_of.len(),
+        CompKind::AnyOf => schema.any_of.len(),
+        CompKind::OneOf => schema.one_of.len(),
+    };
+
+    let mut to_remove: Option<usize> = None;
+
+    for i in 0..list_len {
+        let entry = match comp_kind {
+            CompKind::AllOf => &mut schema.all_of[i],
+            CompKind::AnyOf => &mut schema.any_of[i],
+            CompKind::OneOf => &mut schema.one_of[i],
+        };
+        let entry_label = entry.ref_.as_deref()
+            .map(|r| format!("$ref: {r}"))
+            .or_else(|| { let t = entry.type_str(); if t.is_empty() { None } else { Some(t.to_string()) } })
+            .unwrap_or_else(|| format!("Entry {}", i + 1));
+
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{}. {}", i + 1, entry_label)).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("🗑").clicked() { to_remove = Some(i); }
+                });
+            });
+            ch |= edit_composition_entry(ui, entry, &format!("{id}__centry_{i}"), depth);
+        });
+        ui.add_space(2.0);
     }
 
     if let Some(idx) = to_remove {
-        list.remove(idx);
+        match comp_kind {
+            CompKind::AllOf => schema.all_of.remove(idx),
+            CompKind::AnyOf => schema.any_of.remove(idx),
+            CompKind::OneOf => schema.one_of.remove(idx),
+        };
         ch = true;
     }
 
-    if ui.small_button(format!("＋ Add {label} entry")).clicked() {
-        list.push(Box::new(Schema::default()));
+    if ui.button(format!("＋ Add {} entry", comp_kind.label())).clicked() {
+        match comp_kind {
+            CompKind::AllOf => schema.all_of.push(Box::new(Schema::default())),
+            CompKind::AnyOf => schema.any_of.push(Box::new(Schema::default())),
+            CompKind::OneOf => schema.one_of.push(Box::new(Schema::default())),
+        }
         ch = true;
     }
+
+    ch
+}
+
+fn edit_composition_entry(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32) -> bool {
+    let mut ch = false;
+    let is_ref = schema.ref_.is_some();
+
+    // Inline / $ref toggle
+    ui.horizontal(|ui| {
+        if ui.selectable_label(!is_ref, "Inline").clicked() && is_ref {
+            schema.ref_ = None;
+            ch = true;
+        }
+        if ui.selectable_label(is_ref, "$ref").clicked() && !is_ref {
+            schema.ref_ = Some(String::new());
+            ch = true;
+        }
+    });
+
+    if is_ref {
+        ui.horizontal(|ui| {
+            ui.label("$ref:");
+            ch |= ref_picker(
+                ui, &mut schema.ref_,
+                egui::Id::new(format!("{id}__ref_pick")),
+                egui::Id::new("oa_schema_refs"),
+            );
+        });
+    } else if depth < 3 {
+        ch |= form_grid(ui, &format!("{id}__inline"), |ui| {
+            let mut c = false;
+            c |= row_opt_str(ui, "Title:", &mut schema.title);
+            c |= row_opt_str(ui, "Description:", &mut schema.description);
+            let mut type_str = schema.type_str().to_string();
+            ui.label("Type:");
+            egui::ComboBox::from_id_salt(format!("{id}__type"))
+                .selected_text(type_str.as_str())
+                .show_ui(ui, |ui| {
+                    for t in ["", "string", "number", "integer", "boolean", "array", "object", "null"] {
+                        if ui.selectable_label(type_str == t, t).clicked() { type_str = t.to_string(); c = true; }
+                    }
+                });
+            ui.end_row();
+            if c { schema.set_type_str(&type_str); }
+            c
+        });
+        if schema.type_str() == "object" || !schema.properties.is_empty() {
+            ui.label(RichText::new("Properties:").strong());
+            ch |= edit_schema_properties_flat(ui, schema, &format!("{id}__iprops"), depth + 1);
+        }
+    }
+
     ch
 }
 

@@ -22,7 +22,6 @@ pub enum Selection {
     Example(String),
     Header(String),
     SecurityScheme(String),
-    Link(String),
 }
 
 // ── Add-item buffers (for inline "new item" forms) ────────────────────────────
@@ -35,13 +34,7 @@ pub struct NewItemBuffers {
     pub response_name: String,
     pub parameter_name: String,
     pub example_name: String,
-    pub header_name: String,
-    pub security_scheme_name: String,
-    pub server_url: String,
-    pub tag_name: String,
-    pub property_name: String,
     pub response_code: String,
-    pub content_type: String,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
