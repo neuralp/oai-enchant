@@ -22,6 +22,7 @@ pub enum Selection {
     Example(String),
     Header(String),
     SecurityScheme(String),
+    RawEditor,
 }
 
 // ── Add-item buffers (for inline "new item" forms) ────────────────────────────
@@ -47,6 +48,8 @@ pub struct App {
     pub dirty: bool,
     pub status: String,
     pub new_item: NewItemBuffers,
+    pub raw_editor_buf: String,
+    pub raw_editor_err: String,
 }
 
 impl App {
@@ -59,7 +62,21 @@ impl App {
             dirty: false,
             status: "Ready. Open or create an OpenAPI specification.".to_string(),
             new_item: NewItemBuffers::default(),
+            raw_editor_buf: String::new(),
+            raw_editor_err: String::new(),
         }
+    }
+
+    /// Serialize the current spec into the raw editor buffer and switch to the raw editor view.
+    pub fn open_raw_editor(&mut self) {
+        if let Some(spec) = &self.spec {
+            self.raw_editor_buf = match self.format {
+                FileFormat::Json => serde_json::to_string_pretty(spec).unwrap_or_default(),
+                FileFormat::Yaml => serde_yaml::to_string(spec).unwrap_or_default(),
+            };
+            self.raw_editor_err = String::new();
+        }
+        self.selection = Selection::RawEditor;
     }
 
     pub fn new_spec(&mut self) {
@@ -421,14 +438,36 @@ impl eframe::App for App {
             });
 
         // ── Editor ────────────────────────────────────────────────────────────
+        let is_raw = self.selection == Selection::RawEditor;
+        let fmt    = self.format;
+        let mut raw_apply: Option<OpenApiSpec> = None;
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(spec) = self.spec.as_mut() {
+            if is_raw {
+                raw_apply = crate::editors::show_raw_editor(
+                    ui, fmt,
+                    &mut self.raw_editor_buf,
+                    &mut self.raw_editor_err,
+                );
+            } else if let Some(spec) = self.spec.as_mut() {
                 let changed =
                     crate::editors::show(ui, spec, &self.selection, &mut self.new_item);
                 if changed {
                     self.dirty = true;
+                    // If a path was renamed, update the selection to the new key.
+                    if let Some(new_path) = ui.data_mut(|d| {
+                        d.remove_temp::<String>(egui::Id::new("oa_path_rename"))
+                    }) {
+                        self.selection = Selection::Path(new_path);
+                    }
                 }
             }
         });
+
+        if let Some(new_spec) = raw_apply {
+            self.spec = Some(new_spec);
+            self.dirty = true;
+            self.status = "Applied raw editor changes.".to_string();
+        }
     }
 }

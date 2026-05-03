@@ -79,9 +79,344 @@ pub fn show(
                 let name = name.clone();
                 changed = edit_security_scheme_by_name(ui, spec, &name);
             }
+            // Handled in app.rs before editors::show is called.
+            Selection::RawEditor => {}
         }
     });
     changed
+}
+
+// ── Raw text editor ───────────────────────────────────────────────────────────
+
+/// Show the full-text editor with syntax highlighting.
+/// Returns Some(spec) when the user successfully applies changes.
+pub fn show_raw_editor(
+    ui: &mut Ui,
+    format: FileFormat,
+    buf: &mut String,
+    err: &mut String,
+) -> Option<OpenApiSpec> {
+    let mut result: Option<OpenApiSpec> = None;
+
+    // ── Header bar ────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        ui.strong(format!("Raw Editor  ({})", format));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let apply = ui.button("Apply Changes");
+            if !err.is_empty() {
+                ui.label(
+                    RichText::new("parse error \u{26a0}")
+                        .color(egui::Color32::from_rgb(220, 80, 80))
+                        .small(),
+                );
+            }
+            if apply.clicked() {
+                let parsed: Result<OpenApiSpec, String> = match format {
+                    FileFormat::Json => {
+                        serde_json::from_str(buf).map_err(|e| e.to_string())
+                    }
+                    FileFormat::Yaml => {
+                        serde_yaml::from_str(buf).map_err(|e| e.to_string())
+                    }
+                };
+                match parsed {
+                    Ok(spec) => { *err = String::new(); result = Some(spec); }
+                    Err(e)   => { *err = e; }
+                }
+            }
+        });
+    });
+    ui.separator();
+
+    // ── Text editor ───────────────────────────────────────────────────────────
+    let is_json = format == FileFormat::Json;
+    let err_height  = if err.is_empty() { 0.0 } else { 56.0 };
+    let editor_height = (ui.available_height() - err_height).max(80.0);
+
+    let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
+        let mut job = if is_json {
+            highlight_json(ui, text)
+        } else {
+            highlight_yaml(ui, text)
+        };
+        job.wrap.max_width = wrap_width;
+        ui.fonts(|f| f.layout_job(job))
+    };
+
+    egui::ScrollArea::both()
+        .id_salt("raw_ed_scroll")
+        .max_height(editor_height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(buf)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(40)
+                    .layouter(&mut layouter),
+            );
+        });
+
+    // ── Parse-error panel ─────────────────────────────────────────────────────
+    if !err.is_empty() {
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("raw_ed_err_scroll")
+            .max_height(48.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(err.as_str())
+                        .color(egui::Color32::from_rgb(220, 80, 80))
+                        .small()
+                        .monospace(),
+                );
+            });
+    }
+
+    result
+}
+
+// ── Syntax highlighting ───────────────────────────────────────────────────────
+
+fn push_tok(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    color: egui::Color32,
+    font: &egui::FontId,
+) {
+    if text.is_empty() { return; }
+    job.append(
+        text,
+        0.0,
+        egui::text::TextFormat { font_id: font.clone(), color, ..Default::default() },
+    );
+}
+
+// ── YAML ──────────────────────────────────────────────────────────────────────
+
+fn highlight_yaml(ui: &egui::Ui, code: &str) -> egui::text::LayoutJob {
+    let size   = ui.text_style_height(&egui::TextStyle::Monospace);
+    let font   = egui::FontId::monospace(size);
+    let normal = ui.visuals().text_color();
+
+    // VS Code Dark+ palette (readable on both themes)
+    let c_comment = egui::Color32::from_rgb(106, 153,  85);
+    let c_key     = egui::Color32::from_rgb(156, 220, 254);
+    let c_ref_key = egui::Color32::from_rgb(197, 134, 192);
+    let c_string  = egui::Color32::from_rgb(206, 145, 120);
+    let c_number  = egui::Color32::from_rgb(181, 206, 168);
+    let c_keyword = egui::Color32::from_rgb( 86, 156, 214);
+    let c_marker  = egui::Color32::from_rgb(128, 128, 128);
+
+    let mut job = egui::text::LayoutJob::default();
+
+    for line in code.split('\n') {
+        let trimmed    = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+
+        if trimmed.starts_with('#') {
+            push_tok(&mut job, line, c_comment, &font);
+            push_tok(&mut job, "\n", normal, &font);
+            continue;
+        }
+        if trimmed == "---" || trimmed == "..." {
+            push_tok(&mut job, line, c_marker, &font);
+            push_tok(&mut job, "\n", normal, &font);
+            continue;
+        }
+
+        push_tok(&mut job, &line[..indent_len], normal, &font);
+
+        // List marker
+        let content = if let Some(rest) = trimmed.strip_prefix("- ") {
+            push_tok(&mut job, "- ", c_marker, &font);
+            rest
+        } else if trimmed == "-" {
+            push_tok(&mut job, "-", c_marker, &font);
+            push_tok(&mut job, "\n", normal, &font);
+            continue;
+        } else {
+            trimmed
+        };
+
+        if let Some(colon) = yaml_key_colon(content) {
+            let key  = &content[..colon];
+            let rest = &content[colon + 1..];            // everything after ':'
+            let kc   = if key == "$ref" { c_ref_key } else { c_key };
+            push_tok(&mut job, key, kc, &font);
+            push_tok(&mut job, ":", normal, &font);
+
+            if let Some(val_start) = rest.find(|c: char| !c.is_whitespace()) {
+                let leading = &rest[..val_start];
+                let value   = &rest[val_start..];
+                push_tok(&mut job, leading, normal, &font);
+
+                let (val_part, cmt_part) = yaml_split_comment(value);
+                let vc = if key == "$ref" {
+                    c_ref_key
+                } else {
+                    yaml_value_color(val_part, c_string, c_number, c_keyword, normal)
+                };
+                push_tok(&mut job, val_part, vc, &font);
+                push_tok(&mut job, cmt_part, c_comment, &font);
+            }
+        } else {
+            // Bare scalar (list item value, multiline continuation, etc.)
+            push_tok(&mut job, content, yaml_value_color(content, c_string, c_number, c_keyword, normal), &font);
+        }
+
+        push_tok(&mut job, "\n", normal, &font);
+    }
+
+    job
+}
+
+/// Find the byte offset of the `:` that ends a YAML key (not inside quotes).
+fn yaml_key_colon(s: &str) -> Option<usize> {
+    let mut in_sq = false;
+    let mut in_dq = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '\'' if !in_dq => in_sq = !in_sq,
+            '"'  if !in_sq => in_dq = !in_dq,
+            ':' if !in_sq && !in_dq => {
+                let after = &s[i + 1..];
+                if after.is_empty() || after.starts_with(' ') || after.starts_with('\t') {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split `value # comment` → ("value", " # comment").
+fn yaml_split_comment(s: &str) -> (&str, &str) {
+    let b = s.as_bytes();
+    let mut in_sq = false;
+    let mut in_dq = false;
+    for i in 0..b.len() {
+        match b[i] {
+            b'\'' if !in_dq => in_sq = !in_sq,
+            b'"'  if !in_sq => in_dq = !in_dq,
+            b'#'  if !in_sq && !in_dq && i > 0 && b[i - 1] == b' ' => {
+                return (s[..i - 1].trim_end(), &s[i - 1..]);
+            }
+            _ => {}
+        }
+    }
+    (s, "")
+}
+
+fn yaml_value_color(
+    val: &str,
+    c_string: egui::Color32,
+    c_number: egui::Color32,
+    c_keyword: egui::Color32,
+    normal: egui::Color32,
+) -> egui::Color32 {
+    if val.starts_with('\'') || val.starts_with('"') { return c_string; }
+    match val.trim_end() {
+        "true" | "false" | "null" | "~" | "yes" | "no" | "on" | "off" => return c_keyword,
+        _ => {}
+    }
+    let t = val.trim_end();
+    let first = t.chars().next().unwrap_or(' ');
+    if first.is_ascii_digit()
+        || (first == '-' && t.chars().nth(1).map(|c| c.is_ascii_digit()).unwrap_or(false))
+    {
+        if t.chars().all(|c| c.is_ascii_digit() || "._eE+-".contains(c)) {
+            return c_number;
+        }
+    }
+    normal
+}
+
+// ── JSON ──────────────────────────────────────────────────────────────────────
+
+fn highlight_json(ui: &egui::Ui, code: &str) -> egui::text::LayoutJob {
+    let size   = ui.text_style_height(&egui::TextStyle::Monospace);
+    let font   = egui::FontId::monospace(size);
+    let normal = ui.visuals().text_color();
+
+    let c_key   = egui::Color32::from_rgb(156, 220, 254);
+    let c_str   = egui::Color32::from_rgb(206, 145, 120);
+    let c_num   = egui::Color32::from_rgb(181, 206, 168);
+    let c_bool  = egui::Color32::from_rgb( 86, 156, 214);
+    let c_punct = egui::Color32::from_rgb(204, 204, 204);
+
+    let mut job  = egui::text::LayoutJob::default();
+    let bytes    = code.as_bytes();
+    let n        = bytes.len();
+    let mut i    = 0;
+    let mut seg  = 0; // start of current non-string segment
+
+    while i < n {
+        if bytes[i] == b'"' {
+            // Flush non-string segment
+            if i > seg {
+                json_nonstring(&mut job, &code[seg..i], normal, c_num, c_bool, c_punct, &font);
+            }
+            let str_start = i;
+            i += 1;
+            while i < n {
+                if bytes[i] == b'\\' { i += 2; continue; }
+                if bytes[i] == b'"' { i += 1; break; }
+                i += 1;
+            }
+            // Is this string a key? (next non-whitespace char is ':')
+            let is_key = code[i..].trim_start_matches(|c: char| c.is_whitespace()).starts_with(':');
+            push_tok(&mut job, &code[str_start..i], if is_key { c_key } else { c_str }, &font);
+            seg = i;
+        } else {
+            i += 1;
+        }
+    }
+    if seg < n {
+        json_nonstring(&mut job, &code[seg..], normal, c_num, c_bool, c_punct, &font);
+    }
+
+    job
+}
+
+fn json_nonstring(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    normal: egui::Color32,
+    c_num: egui::Color32,
+    c_bool: egui::Color32,
+    c_punct: egui::Color32,
+    font: &egui::FontId,
+) {
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i] as char;
+        if "{}[]:,".contains(c) {
+            push_tok(job, &text[i..i + 1], c_punct, font);
+            i += 1;
+        } else if text[i..].starts_with("true") {
+            push_tok(job, "true",  c_bool, font); i += 4;
+        } else if text[i..].starts_with("false") {
+            push_tok(job, "false", c_bool, font); i += 5;
+        } else if text[i..].starts_with("null") {
+            push_tok(job, "null",  c_bool, font); i += 4;
+        } else if c.is_ascii_digit()
+            || (c == '-' && i + 1 < b.len() && (b[i + 1] as char).is_ascii_digit())
+        {
+            let start = i;
+            i += 1;
+            while i < b.len() && "0123456789.eE+-".contains(b[i] as char) {
+                i += 1;
+            }
+            push_tok(job, &text[start..i], c_num, font);
+        } else {
+            let len = c.len_utf8();
+            push_tok(job, &text[i..i + len], normal, font);
+            i += len;
+        }
+    }
 }
 
 // ── Form helpers ──────────────────────────────────────────────────────────────
@@ -372,7 +707,7 @@ fn edit_servers(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
         ch = true;
     }
 
-    if ui.button("＋ Add Server").clicked() {
+    if ui.button("+ Add Server").clicked() {
         spec.servers.push(Server::default());
         ch = true;
     }
@@ -406,7 +741,7 @@ fn edit_tags(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
         ch = true;
     }
 
-    if ui.button("＋ Add Tag").clicked() {
+    if ui.button("+ Add Tag").clicked() {
         spec.tags.push(Tag { name: format!("tag{}", spec.tags.len() + 1), ..Default::default() });
         ch = true;
     }
@@ -425,8 +760,56 @@ fn edit_external_docs(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
 }
 
 fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, _new_item: &mut NewItemBuffers) -> bool {
+    // ── Editable path ─────────────────────────────────────────────────────────
+    // Use a tracking key so the buffer resets whenever the user navigates to a
+    // different path (avoids stale text from the previous selection).
+    let buf_id     = egui::Id::new("path_edit_buf");
+    let tracked_id = egui::Id::new("path_edit_tracked");
+    let tracked: String = ui.data(|d| d.get_temp(tracked_id).unwrap_or_default());
+    if tracked != path {
+        ui.data_mut(|d| {
+            d.insert_temp(tracked_id, path.to_string());
+            d.insert_temp(buf_id,     path.to_string());
+        });
+    }
+    let mut buf: String = ui.data(|d| d.get_temp(buf_id).unwrap_or_else(|| path.to_string()));
+
     ui.heading("Path Item");
-    ui.label(RichText::new(path).monospace().strong());
+    let mut renamed_to: Option<String> = None;
+    ui.horizontal(|ui| {
+        ui.label("Path:");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .font(egui::TextStyle::Monospace)
+                .desired_width(340.0)
+                .hint_text("/new-path"),
+        );
+        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+
+        if resp.lost_focus() && !buf.trim().is_empty() && buf != path {
+            let new_key = if buf.starts_with('/') { buf.clone() } else { format!("/{buf}") };
+            if spec.paths.contains_key(&new_key) {
+                // Conflict — reset buffer
+                ui.data_mut(|d| d.insert_temp(buf_id, path.to_string()));
+                ui.label(RichText::new("path already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
+            } else {
+                renamed_to = Some(new_key);
+            }
+        }
+    });
+
+    // Apply rename, preserving IndexMap insertion order
+    if let Some(new_key) = renamed_to {
+        let reordered: Vec<(String, PathItem)> = std::mem::take(&mut spec.paths)
+            .into_iter()
+            .map(|(k, v)| if k == path { (new_key.clone(), v) } else { (k, v) })
+            .collect();
+        spec.paths = reordered.into_iter().collect();
+        // Signal app.rs to update the Selection so the sidebar stays in sync
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_path_rename"), new_key));
+        return true; // next frame re-enters with the new path
+    }
+
     ui.add_space(4.0);
 
     let Some(item) = spec.paths.get_mut(path) else {
@@ -457,7 +840,7 @@ fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, _new_item: &mut Ne
                     item.set_operation(method, None);
                     ch = true;
                 }
-            } else if ui.small_button("＋ Add").clicked() {
+            } else if ui.small_button("+ Add").clicked() {
                 item.set_operation(method, Some(Operation::default()));
                 ch = true;
             }
@@ -476,6 +859,9 @@ fn edit_operation(
     ui.heading(format!("{method} {path}"));
     ui.add_space(4.0);
 
+    // Collect defined tag names before mutably borrowing spec.paths.
+    let defined_tags: Vec<String> = spec.tags.iter().map(|t| t.name.clone()).collect();
+
     let Some(item) = spec.paths.get_mut(path) else {
         ui.label("Path not found.");
         return false;
@@ -493,18 +879,43 @@ fn edit_operation(
         c |= row_opt_str(ui, "Operation ID:", &mut op.operation_id);
         c |= row_opt_str(ui, "Summary:", &mut op.summary);
 
-        // Tags as comma-separated string
-        let mut tags_str = op.tags.join(", ");
-        ui.label("Tags (comma-separated):");
-        if ui.text_edit_singleline(&mut tags_str).changed() {
-            op.tags = tags_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+        // Tag multi-select: chips for assigned tags, dropdown to add more
+        ui.label("Tags:");
+        let mut remove_idx: Option<usize> = None;
+        let mut add_tag: Option<String> = None;
+        ui.horizontal_wrapped(|ui| {
+            // Assigned tag chips — click to remove
+            for (i, tag) in op.tags.iter().enumerate() {
+                if ui
+                    .selectable_label(true, RichText::new(format!("{tag}  \u{00d7}")).small())
+                    .on_hover_text("Click to remove")
+                    .clicked()
+                {
+                    remove_idx = Some(i);
+                }
+            }
+            // Dropdown of unassigned document tags
+            let unassigned: Vec<&str> = defined_tags
+                .iter()
+                .filter(|t| !op.tags.iter().any(|ot| ot == *t))
+                .map(|t| t.as_str())
                 .collect();
-            c = true;
-        }
+            if !unassigned.is_empty() {
+                ui.menu_button(RichText::new("+ tag").small(), |ui| {
+                    for name in &unassigned {
+                        if ui.button(*name).clicked() {
+                            add_tag = Some(name.to_string());
+                            ui.close_menu();
+                        }
+                    }
+                });
+            } else if defined_tags.is_empty() {
+                ui.label(RichText::new("(define tags in the Tags section)").weak().small());
+            }
+        });
         ui.end_row();
+        if let Some(i) = remove_idx { op.tags.remove(i); c = true; }
+        if let Some(name) = add_tag { op.tags.push(name); c = true; }
 
         c |= row_opt_bool(ui, "Deprecated:", &mut op.deprecated);
         c
@@ -553,7 +964,7 @@ fn edit_operation(
     }
 
     ui.horizontal(|ui| {
-        if ui.small_button("＋ Add Parameter").clicked() {
+        if ui.small_button("+ Add Parameter").clicked() {
             op.parameters.push(RefOr::Item(Parameter {
                 in_: "query".to_string(),
                 ..Default::default()
@@ -582,7 +993,7 @@ fn edit_operation(
                     }
                 });
         }
-        if ui.small_button("＋ Add $ref").clicked() && !new_item.parameter_name.is_empty() {
+        if ui.small_button("+ Add $ref").clicked() && !new_item.parameter_name.is_empty() {
             let r = new_item.parameter_name.clone();
             new_item.parameter_name.clear();
             op.parameters.push(RefOr::Ref(Ref { ref_: r, ..Default::default() }));
@@ -594,7 +1005,7 @@ fn edit_operation(
     section_header(ui, "Request Body");
     match op.request_body.as_mut() {
         None => {
-            if ui.button("＋ Add Request Body").clicked() {
+            if ui.button("+ Add Request Body").clicked() {
                 op.request_body = Some(RefOr::Item(RequestBody::default()));
                 ch = true;
             }
@@ -636,7 +1047,7 @@ fn edit_operation(
                 .hint_text("200")
                 .desired_width(60.0),
         );
-        if ui.small_button("＋ Add Response").clicked() && !new_item.response_code.is_empty() {
+        if ui.small_button("+ Add Response").clicked() && !new_item.response_code.is_empty() {
             let code = new_item.response_code.clone();
             new_item.response_code.clear();
             op.responses.insert(code, RefOr::Item(Response {
@@ -725,7 +1136,7 @@ fn edit_request_body_item(ui: &mut Ui, body: &mut RequestBody, id: &str) -> bool
         let mut buf: String = ui.data_mut(|d| d.get_temp::<String>(buf_id).unwrap_or_default());
         ui.add(egui::TextEdit::singleline(&mut buf).hint_text("application/json").desired_width(180.0));
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if ui.small_button("＋").clicked() && !buf.is_empty() {
+        if ui.small_button("+").clicked() && !buf.is_empty() {
             body.content.entry(buf.clone()).or_default();
             ui.data_mut(|d| d.insert_temp(buf_id, String::new()));
             ch = true;
@@ -741,7 +1152,7 @@ fn edit_media_type(ui: &mut Ui, media: &mut MediaType, id: &str) -> bool {
     ui.label("Schema:");
     match &media.schema {
         None => {
-            if ui.small_button("＋ Set Schema").clicked() {
+            if ui.small_button("+ Set Schema").clicked() {
                 media.schema = Some(RefOr::Item(Schema::default()));
                 ch = true;
             }
@@ -804,7 +1215,7 @@ fn edit_response_item(ui: &mut Ui, resp: &mut Response, id: &str) -> bool {
         let mut buf: String = ui.data_mut(|d| d.get_temp::<String>(buf_id).unwrap_or_default());
         ui.add(egui::TextEdit::singleline(&mut buf).hint_text("application/json").desired_width(180.0));
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if ui.small_button("＋").clicked() && !buf.is_empty() {
+        if ui.small_button("+").clicked() && !buf.is_empty() {
             resp.content.entry(buf.clone()).or_default();
             ui.data_mut(|d| d.insert_temp(buf_id, String::new()));
             ch = true;
@@ -1016,219 +1427,304 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
     let prop_keys: Vec<String> = schema.properties.keys().cloned().collect();
     let mut to_remove: Option<String> = None;
     let mut rename_op: Option<(String, String)> = None;
+    let mut reorder_op: Option<(usize, usize)> = None;
+    let is_dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
 
-    for prop_name in &prop_keys {
-        // Collect state before borrowing properties mutably.
+    // Helper closure: render a drop-zone separator between cards.
+    let drop_line = |ui: &mut Ui, target_idx: usize, reorder_op: &mut Option<(usize, usize)>| {
+        let (dz, payload) = ui.dnd_drop_zone::<usize, ()>(egui::Frame::none(), |ui| {
+            ui.set_min_size(egui::vec2(ui.available_width(), if is_dragging { 8.0 } else { 0.0 }));
+        });
+        if is_dragging {
+            let color = if dz.response.contains_pointer() {
+                ui.visuals().selection.bg_fill
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            ui.painter().hline(
+                dz.response.rect.x_range(),
+                dz.response.rect.center().y,
+                egui::Stroke::new(2.0, color),
+            );
+        }
+        if let Some(from) = payload {
+            *reorder_op = Some((*from, target_idx));
+        }
+    };
+
+    for (idx, prop_name) in prop_keys.iter().enumerate() {
         let is_required = schema.required.contains(prop_name);
         let mut new_required = is_required;
         let mut do_remove = false;
         let mut rename_to: Option<String> = None;
 
+        // Drop zone above this item
+        drop_line(ui, idx, &mut reorder_op);
+
         if let Some(prop_schema) = schema.properties.get_mut(prop_name) {
             ui.group(|ui| {
-                // Row 1: name | type | Req toggle | Dep toggle | delete
-                ui.horizontal(|ui| {
-                    let nbuf_id = egui::Id::new(format!("{id}__pname__{prop_name}"));
-                    let mut nbuf: String = ui.data(|d| {
-                        d.get_temp(nbuf_id).unwrap_or_else(|| prop_name.clone())
-                    });
-                    let nresp = ui.add(
-                        egui::TextEdit::singleline(&mut nbuf)
-                            .desired_width(120.0)
-                            .hint_text("name"),
-                    );
-                    ui.data_mut(|d| d.insert_temp(nbuf_id, nbuf.clone()));
-                    if nresp.lost_focus() && !nbuf.is_empty() && nbuf != *prop_name {
-                        rename_to = Some(nbuf);
-                    }
-
-                    ui.label("Type:");
-                    let mut type_str = prop_schema.type_str().to_string();
-                    let mut type_changed = false;
-                    egui::ComboBox::from_id_salt(format!("{id}__ptype__{prop_name}"))
-                        .selected_text(type_str.as_str())
-                        .width(88.0)
-                        .show_ui(ui, |ui| {
-                            for t in ["", "string", "number", "integer", "boolean", "array", "object", "null"] {
-                                if ui.selectable_label(type_str == t, t).clicked() {
-                                    type_str = t.to_string();
-                                    type_changed = true;
-                                }
-                            }
-                        });
-                    if type_changed { prop_schema.set_type_str(&type_str); ch = true; }
-
-                    ui.label("Req:");
-                    toggle_switch(ui, &mut new_required); // deferred apply below
-
-                    ui.label("Dep:");
-                    let mut dep = prop_schema.deprecated.unwrap_or(false);
-                    if toggle_switch(ui, &mut dep).changed() {
-                        prop_schema.deprecated = Some(dep);
-                        ch = true;
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("🗑").clicked() { do_remove = true; }
-                    });
-                });
-
-                // Row 2: description
-                ui.horizontal(|ui| {
-                    ui.label("Desc:");
-                    let mut desc = prop_schema.description.clone().unwrap_or_default();
-                    if ui.add(
-                        egui::TextEdit::singleline(&mut desc)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("description"),
-                    ).changed() {
-                        prop_schema.description = if desc.is_empty() { None } else { Some(desc) };
-                        ch = true;
-                    }
-                });
-
-                let ptype = prop_schema.type_str().to_string();
-
-                // String-specific fields
-                if ptype == "string" {
-                    ui.horizontal(|ui| {
-                        ui.label("Format:");
-                        let cur_fmt = prop_schema.format.clone().unwrap_or_default();
-                        egui::ComboBox::from_id_salt(format!("{id}__pfmt__{prop_name}"))
-                            .selected_text(cur_fmt.as_str())
-                            .width(130.0)
-                            .show_ui(ui, |ui| {
-                                for &opt in format_options("string") {
-                                    if ui.selectable_label(cur_fmt == opt, opt).clicked() {
-                                        prop_schema.format = if opt.is_empty() { None } else { Some(opt.to_string()) };
-                                        ch = true;
-                                    }
-                                }
-                            });
-                        ui.label("Pattern:");
-                        let mut pat = prop_schema.pattern.clone().unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut pat).desired_width(110.0)).changed() {
-                            prop_schema.pattern = if pat.is_empty() { None } else { Some(pat) };
-                            ch = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Default:");
-                        if opt_json_field(ui, &mut prop_schema.default, 100.0, "value") { ch = true; }
-                        ui.label("Example:");
-                        if opt_json_field(ui, &mut prop_schema.example, 100.0, "value") { ch = true; }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("MinLen:");
-                        let mut s = prop_schema.min_length.map(|v| v.to_string()).unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(50.0)).changed() {
-                            prop_schema.min_length = s.parse().ok();
-                            ch = true;
-                        }
-                        ui.label("MaxLen:");
-                        let mut s = prop_schema.max_length.map(|v| v.to_string()).unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(50.0)).changed() {
-                            prop_schema.max_length = s.parse().ok();
-                            ch = true;
-                        }
-                    });
-                }
-
-                // Number/Integer-specific fields
-                if ptype == "number" || ptype == "integer" {
-                    ui.horizontal(|ui| {
-                        ui.label("Format:");
-                        let cur_fmt = prop_schema.format.clone().unwrap_or_default();
-                        egui::ComboBox::from_id_salt(format!("{id}__pfmt__{prop_name}"))
-                            .selected_text(cur_fmt.as_str())
-                            .width(80.0)
-                            .show_ui(ui, |ui| {
-                                for &opt in format_options(&ptype) {
-                                    if ui.selectable_label(cur_fmt == opt, opt).clicked() {
-                                        prop_schema.format = if opt.is_empty() { None } else { Some(opt.to_string()) };
-                                        ch = true;
-                                    }
-                                }
-                            });
-                        ui.label("MultipleOf:");
-                        let mut s = prop_schema.multiple_of.map(|v| v.to_string()).unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(60.0)).changed() {
-                            prop_schema.multiple_of = s.parse().ok();
-                            ch = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Default:");
-                        if opt_json_field(ui, &mut prop_schema.default, 80.0, "value") { ch = true; }
-                        ui.label("Example:");
-                        if opt_json_field(ui, &mut prop_schema.example, 80.0, "value") { ch = true; }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min:");
-                        let mut s = prop_schema.minimum.map(|v| v.to_string()).unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(55.0)).changed() {
-                            prop_schema.minimum = s.parse().ok();
-                            ch = true;
-                        }
-                        ui.label("Max:");
-                        let mut s = prop_schema.maximum.map(|v| v.to_string()).unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(55.0)).changed() {
-                            prop_schema.maximum = s.parse().ok();
-                            ch = true;
-                        }
-                        ui.label("ExclMin:");
-                        if excl_bound_field(ui, &mut prop_schema.exclusive_minimum, 55.0, "number") { ch = true; }
-                        ui.label("ExclMax:");
-                        if excl_bound_field(ui, &mut prop_schema.exclusive_maximum, 55.0, "number") { ch = true; }
-                    });
-                }
-
-                // Array
-                if ptype == "array" {
-                    ui.horizontal(|ui| {
-                        ui.label("Items:");
-                        let items = prop_schema.items.get_or_insert_with(|| Box::new(Schema::default()));
-                        ch |= ref_picker(
-                            ui, &mut items.ref_,
-                            egui::Id::new(format!("{id}__pitems_ref__{prop_name}")),
-                            egui::Id::new("oa_schema_refs"),
-                        );
-                    });
-                    // Show type combo only when no $ref is set
-                    let items_has_ref = prop_schema.items.as_ref().map(|i| i.ref_.is_some()).unwrap_or(false);
-                    if !items_has_ref {
+                        // Row 1: name | type | Req toggle | Dep toggle | delete
                         ui.horizontal(|ui| {
-                            ui.label("Items type:");
-                            let items = prop_schema.items.get_or_insert_with(|| Box::new(Schema::default()));
-                            let mut it = items.type_str().to_string();
-                            let mut it_changed = false;
-                            egui::ComboBox::from_id_salt(format!("{id}__pitems_type__{prop_name}"))
-                                .selected_text(&it).width(100.0)
+
+                            let nbuf_id = egui::Id::new(format!("{id}__pname__{prop_name}"));
+                            let mut nbuf: String = ui.data(|d| {
+                                d.get_temp(nbuf_id).unwrap_or_else(|| prop_name.clone())
+                            });
+                            let nresp = ui.add(
+                                egui::TextEdit::singleline(&mut nbuf)
+                                    .desired_width(120.0)
+                                    .hint_text("name"),
+                            );
+                            ui.data_mut(|d| d.insert_temp(nbuf_id, nbuf.clone()));
+                            if nresp.lost_focus() && !nbuf.is_empty() && nbuf != *prop_name {
+                                rename_to = Some(nbuf);
+                            }
+
+                            ui.label("Type:");
+                            let mut type_str = if prop_schema.ref_.is_some() {
+                                "$ref".to_string()
+                            } else {
+                                prop_schema.type_str().to_string()
+                            };
+                            let mut type_changed = false;
+                            egui::ComboBox::from_id_salt(format!("{id}__ptype__{prop_name}"))
+                                .selected_text(type_str.as_str())
+                                .width(88.0)
                                 .show_ui(ui, |ui| {
-                                    for t in ["", "string", "number", "integer", "boolean", "object"] {
-                                        if ui.selectable_label(it == t, t).clicked() { it = t.to_string(); it_changed = true; }
+                                    for t in ["", "string", "number", "integer", "boolean", "array", "object", "null", "$ref"] {
+                                        if ui.selectable_label(type_str == t, t).clicked() {
+                                            type_str = t.to_string();
+                                            type_changed = true;
+                                        }
                                     }
                                 });
-                            if it_changed { items.set_type_str(&it); ch = true; }
-                        });
-                    }
-                }
+                            if type_changed {
+                                if type_str == "$ref" {
+                                    prop_schema.set_type_str("");
+                                    if prop_schema.ref_.is_none() {
+                                        prop_schema.ref_ = Some(String::new());
+                                    }
+                                } else {
+                                    prop_schema.ref_ = None;
+                                    prop_schema.set_type_str(&type_str);
+                                }
+                                ch = true;
+                            }
 
-                // Nested object properties (depth-limited)
-                if ptype == "object" && depth < 2 {
-                    ui.separator();
-                    ui.label(RichText::new("Nested properties:").small().strong());
-                    ch |= edit_schema_properties_flat(
-                        ui, prop_schema,
-                        &format!("{id}__nested__{prop_name}"),
-                        depth + 1,
-                    );
-                }
-            }); // end group (prop_schema borrow released)
+                            ui.label("Req:");
+                            toggle_switch(ui, &mut new_required);
+
+                            ui.label("Dep:");
+                            let mut dep = prop_schema.deprecated.unwrap_or(false);
+                            if toggle_switch(ui, &mut dep).changed() {
+                                prop_schema.deprecated = Some(dep);
+                                ch = true;
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("🗑").clicked() { do_remove = true; }
+                            });
+                        });
+
+                        // Row 2: description
+                        ui.horizontal(|ui| {
+                            ui.label("Desc:");
+                            let mut desc = prop_schema.description.clone().unwrap_or_default();
+                            if ui.add(
+                                egui::TextEdit::singleline(&mut desc)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("description"),
+                            ).changed() {
+                                prop_schema.description = if desc.is_empty() { None } else { Some(desc) };
+                                ch = true;
+                            }
+                        });
+
+                        let ptype = prop_schema.type_str().to_string();
+
+                        // $ref picker
+                        if prop_schema.ref_.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.label("$ref:");
+                                ch |= ref_picker(
+                                    ui, &mut prop_schema.ref_,
+                                    egui::Id::new(format!("{id}__pref__{prop_name}")),
+                                    egui::Id::new("oa_schema_refs"),
+                                );
+                            });
+                        }
+
+                        // String-specific fields
+                        if ptype == "string" && prop_schema.ref_.is_none() {
+                            ui.horizontal(|ui| {
+                                ui.label("Format:");
+                                let cur_fmt = prop_schema.format.clone().unwrap_or_default();
+                                egui::ComboBox::from_id_salt(format!("{id}__pfmt__{prop_name}"))
+                                    .selected_text(cur_fmt.as_str())
+                                    .width(130.0)
+                                    .show_ui(ui, |ui| {
+                                        for &opt in format_options("string") {
+                                            if ui.selectable_label(cur_fmt == opt, opt).clicked() {
+                                                prop_schema.format = if opt.is_empty() { None } else { Some(opt.to_string()) };
+                                                ch = true;
+                                            }
+                                        }
+                                    });
+                                ui.label("Pattern:");
+                                let mut pat = prop_schema.pattern.clone().unwrap_or_default();
+                                if ui.add(egui::TextEdit::singleline(&mut pat).desired_width(110.0)).changed() {
+                                    prop_schema.pattern = if pat.is_empty() { None } else { Some(pat) };
+                                    ch = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Default:");
+                                if opt_json_field(ui, &mut prop_schema.default, 100.0, "value") { ch = true; }
+                                ui.label("Example:");
+                                if opt_json_field(ui, &mut prop_schema.example, 100.0, "value") { ch = true; }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("MinLen:");
+                                let mut s = prop_schema.min_length.map(|v| v.to_string()).unwrap_or_default();
+                                if ui.add(egui::TextEdit::singleline(&mut s).desired_width(50.0)).changed() {
+                                    prop_schema.min_length = s.parse().ok();
+                                    ch = true;
+                                }
+                                ui.label("MaxLen:");
+                                let mut s = prop_schema.max_length.map(|v| v.to_string()).unwrap_or_default();
+                                if ui.add(egui::TextEdit::singleline(&mut s).desired_width(50.0)).changed() {
+                                    prop_schema.max_length = s.parse().ok();
+                                    ch = true;
+                                }
+                            });
+                        }
+
+                        // Number/Integer-specific fields
+                        if (ptype == "number" || ptype == "integer") && prop_schema.ref_.is_none() {
+                            ui.horizontal(|ui| {
+                                ui.label("Format:");
+                                let cur_fmt = prop_schema.format.clone().unwrap_or_default();
+                                egui::ComboBox::from_id_salt(format!("{id}__pfmt__{prop_name}"))
+                                    .selected_text(cur_fmt.as_str())
+                                    .width(80.0)
+                                    .show_ui(ui, |ui| {
+                                        for &opt in format_options(&ptype) {
+                                            if ui.selectable_label(cur_fmt == opt, opt).clicked() {
+                                                prop_schema.format = if opt.is_empty() { None } else { Some(opt.to_string()) };
+                                                ch = true;
+                                            }
+                                        }
+                                    });
+                                ui.label("MultipleOf:");
+                                let mut s = prop_schema.multiple_of.map(|v| v.to_string()).unwrap_or_default();
+                                if ui.add(egui::TextEdit::singleline(&mut s).desired_width(60.0)).changed() {
+                                    prop_schema.multiple_of = s.parse().ok();
+                                    ch = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Default:");
+                                if opt_json_field(ui, &mut prop_schema.default, 80.0, "value") { ch = true; }
+                                ui.label("Example:");
+                                if opt_json_field(ui, &mut prop_schema.example, 80.0, "value") { ch = true; }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Min:");
+                                let mut s = prop_schema.minimum.map(|v| v.to_string()).unwrap_or_default();
+                                if ui.add(egui::TextEdit::singleline(&mut s).desired_width(55.0)).changed() {
+                                    prop_schema.minimum = s.parse().ok();
+                                    ch = true;
+                                }
+                                ui.label("Max:");
+                                let mut s = prop_schema.maximum.map(|v| v.to_string()).unwrap_or_default();
+                                if ui.add(egui::TextEdit::singleline(&mut s).desired_width(55.0)).changed() {
+                                    prop_schema.maximum = s.parse().ok();
+                                    ch = true;
+                                }
+                                ui.label("ExclMin:");
+                                if excl_bound_field(ui, &mut prop_schema.exclusive_minimum, 55.0, "number") { ch = true; }
+                                ui.label("ExclMax:");
+                                if excl_bound_field(ui, &mut prop_schema.exclusive_maximum, 55.0, "number") { ch = true; }
+                            });
+                        }
+
+                        // Array
+                        if ptype == "array" && prop_schema.ref_.is_none() {
+                            ui.horizontal(|ui| {
+                                ui.label("Items:");
+                                let items = prop_schema.items.get_or_insert_with(|| Box::new(Schema::default()));
+                                ch |= ref_picker(
+                                    ui, &mut items.ref_,
+                                    egui::Id::new(format!("{id}__pitems_ref__{prop_name}")),
+                                    egui::Id::new("oa_schema_refs"),
+                                );
+                            });
+                            let items_has_ref = prop_schema.items.as_ref().map(|i| i.ref_.is_some()).unwrap_or(false);
+                            if !items_has_ref {
+                                ui.horizontal(|ui| {
+                                    ui.label("Items type:");
+                                    let items = prop_schema.items.get_or_insert_with(|| Box::new(Schema::default()));
+                                    let mut it = items.type_str().to_string();
+                                    let mut it_changed = false;
+                                    egui::ComboBox::from_id_salt(format!("{id}__pitems_type__{prop_name}"))
+                                        .selected_text(&it).width(100.0)
+                                        .show_ui(ui, |ui| {
+                                            for t in ["", "string", "number", "integer", "boolean", "object"] {
+                                                if ui.selectable_label(it == t, t).clicked() { it = t.to_string(); it_changed = true; }
+                                            }
+                                        });
+                                    if it_changed { items.set_type_str(&it); ch = true; }
+                                });
+                            }
+                        }
+
+                        // Nested object properties (depth-limited)
+                        if ptype == "object" && depth < 2 && prop_schema.ref_.is_none() {
+                            ui.separator();
+                            ui.label(RichText::new("Nested properties:").small().strong());
+                            ch |= edit_schema_properties_flat(
+                                ui, prop_schema,
+                                &format!("{id}__nested__{prop_name}"),
+                                depth + 1,
+                            );
+                        }
+                        // Drag handle — bottom-right of card
+                        // horizontal() constrains height so it doesn't consume remaining group space
+                        ui.horizontal(|ui| {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.dnd_drag_source(
+                                    egui::Id::new(format!("{id}__drag__{prop_name}")),
+                                    idx,
+                                    |ui| {
+                                        // Paint a 2×3 dot grid (braille chars aren't in the bundled font)
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(14.0, 16.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        if ui.is_rect_visible(rect) {
+                                            let color = ui.visuals().weak_text_color();
+                                            for row in 0..3u8 {
+                                                for col in 0..2u8 {
+                                                    ui.painter().circle_filled(
+                                                        egui::pos2(
+                                                            rect.left() + 3.0 + col as f32 * 7.0,
+                                                            rect.top()  + 2.0 + row as f32 * 6.0,
+                                                        ),
+                                                        1.5,
+                                                        color,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    },
+                                );
+                            });
+                        });
+            }); // end group
             ui.add_space(2.0);
         }
 
-        // Apply deferred mutations now that schema is fully unborrowed ─────────
+        // Apply deferred mutations (schema borrow fully released above)
         if new_required != is_required {
             if new_required { if !schema.required.contains(prop_name) { schema.required.push(prop_name.clone()); } }
             else { schema.required.retain(|r| r != prop_name); }
@@ -1239,6 +1735,9 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
             if !schema.properties.contains_key(&nn) { rename_op = Some((prop_name.clone(), nn)); }
         }
     }
+
+    // Final drop zone below the last item
+    drop_line(ui, prop_keys.len(), &mut reorder_op);
 
     if let Some(k) = to_remove {
         schema.properties.shift_remove(&k);
@@ -1254,6 +1753,18 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
             ch = true;
         }
     }
+    if let Some((from, to)) = reorder_op {
+        let n = schema.properties.len();
+        if from < n && to <= n && from != to && from + 1 != to {
+            let mut pairs: Vec<(String, Box<Schema>)> =
+                std::mem::take(&mut schema.properties).into_iter().collect();
+            let dragged = pairs.remove(from);
+            let insert_at = if to > from { to - 1 } else { to };
+            pairs.insert(insert_at, dragged);
+            schema.properties = pairs.into_iter().collect();
+            ch = true;
+        }
+    }
 
     // Add property row
     ui.horizontal(|ui| {
@@ -1261,7 +1772,7 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
         let mut buf: String = ui.data_mut(|d| d.get_temp(buf_id).unwrap_or_default());
         ui.add(egui::TextEdit::singleline(&mut buf).hint_text("new property name").desired_width(150.0));
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if ui.button("＋ Add Property").clicked() && !buf.is_empty() {
+        if ui.button("+ Add Property").clicked() && !buf.is_empty() {
             schema.properties.insert(buf.clone(), Box::new(Schema::default()));
             ui.data_mut(|d| d.insert_temp(buf_id, String::new()));
             ch = true;
@@ -1371,7 +1882,7 @@ fn edit_schema_composition(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u3
         ch = true;
     }
 
-    if ui.button(format!("＋ Add {} entry", comp_kind.label())).clicked() {
+    if ui.button(format!("+ Add {} entry", comp_kind.label())).clicked() {
         match comp_kind {
             CompKind::AllOf => schema.all_of.push(Box::new(Schema::default())),
             CompKind::AnyOf => schema.any_of.push(Box::new(Schema::default())),

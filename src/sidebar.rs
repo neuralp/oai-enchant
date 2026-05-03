@@ -1,4 +1,5 @@
 use crate::app::{App, Selection};
+use crate::lint::{self, Level};
 use crate::model::OpenApiSpec;
 use egui::RichText;
 
@@ -30,6 +31,7 @@ struct SidebarData {
     ex_names: Vec<String>,
     hdr_names: Vec<String>,
     ss_names: Vec<String>,
+    diagnostics: Vec<lint::Diagnostic>,
 }
 
 impl SidebarData {
@@ -64,7 +66,9 @@ impl SidebarData {
         let hdr_names     = comps.map(|c| c.headers.keys().cloned().collect()).unwrap_or_default();
         let ss_names      = comps.map(|c| c.security_schemes.keys().cloned().collect()).unwrap_or_default();
 
-        SidebarData { server_labels, tag_names, paths, schema_names, rb_names, resp_names, param_names, ex_names, hdr_names, ss_names }
+        let diagnostics = lint::lint(spec);
+
+        SidebarData { server_labels, tag_names, paths, schema_names, rb_names, resp_names, param_names, ex_names, hdr_names, ss_names, diagnostics }
     }
 }
 
@@ -80,6 +84,18 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
 fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
     ui.add_space(4.0);
+
+    // ── Raw Editor ────────────────────────────────────────────────────────────
+    if ui
+        .selectable_label(
+            app.selection == Selection::RawEditor,
+            RichText::new("</>  Raw Editor").strong(),
+        )
+        .clicked()
+    {
+        app.open_raw_editor();
+    }
+    ui.separator();
 
     // ── API Info ──────────────────────────────────────────────────────────────
     if ui
@@ -107,7 +123,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                     app.selection = Selection::Servers;
                 }
             }
-            if ui.small_button("＋ Add Server").clicked() {
+            if ui.small_button("+ Add Server").clicked() {
                 if let Some(spec) = app.spec.as_mut() {
                     spec.servers.push(crate::model::Server::default());
                     app.dirty = true;
@@ -126,7 +142,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                     app.selection = Selection::Tags;
                 }
             }
-            if ui.small_button("＋ Add Tag").clicked() {
+            if ui.small_button("+ Add Tag").clicked() {
                 if let Some(spec) = app.spec.as_mut() {
                     let n = spec.tags.len() + 1;
                     spec.tags.push(crate::model::Tag {
@@ -187,7 +203,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                     .copied()
                     .collect();
                 if !available.is_empty() {
-                    ui.menu_button("  ＋ Add operation…", |ui| {
+                    ui.menu_button("  + Add operation…", |ui| {
                         for m in &available {
                             if ui.button(*m).clicked() {
                                 app.add_operation(path_str, m);
@@ -207,7 +223,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                     .hint_text("/new-path")
                     .desired_width(140.0),
             );
-            if ui.small_button("＋").clicked() {
+            if ui.small_button("+").clicked() {
                 let p = app.new_item.path.clone();
                 app.new_item.path.clear();
                 app.add_path(p);
@@ -288,6 +304,64 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                     });
             }
         });
+
+    // ── Errors & Warnings ─────────────────────────────────────────────────────
+    ui.add_space(6.0);
+    ui.separator();
+    show_diagnostics(ui, app, &data.diagnostics);
+}
+
+fn show_diagnostics(ui: &mut egui::Ui, app: &mut App, diags: &[lint::Diagnostic]) {
+    let errors   = diags.iter().filter(|d| d.level == Level::Error).count();
+    let warnings = diags.iter().filter(|d| d.level == Level::Warning).count();
+
+    let (hdr_text, hdr_color) = if errors > 0 {
+        (
+            format!("Errors & Warnings  ({errors}E {warnings}W)"),
+            egui::Color32::from_rgb(220, 80, 80),
+        )
+    } else if warnings > 0 {
+        (
+            format!("Errors & Warnings  ({warnings}W)"),
+            egui::Color32::from_rgb(220, 160, 60),
+        )
+    } else {
+        ("Errors & Warnings".to_string(), ui.visuals().weak_text_color())
+    };
+
+    let default_open = errors > 0 || warnings > 0;
+
+    egui::CollapsingHeader::new(RichText::new(hdr_text).strong().color(hdr_color))
+        .id_salt("sb_diagnostics")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            if diags.is_empty() {
+                ui.label(RichText::new("  No issues found").weak().small());
+                return;
+            }
+            let mut goto: Option<Selection> = None;
+            for diag in diags {
+                let (icon, color) = match diag.level {
+                    Level::Error   => ("E", egui::Color32::from_rgb(220, 80, 80)),
+                    Level::Warning => ("W", egui::Color32::from_rgb(220, 160, 60)),
+                    Level::Info    => ("i", egui::Color32::GRAY),
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon).small().strong().color(color));
+                    let label = RichText::new(&diag.message).small();
+                    if diag.goto.is_some() {
+                        if ui.selectable_label(false, label).on_hover_text("Click to navigate").clicked() {
+                            goto = diag.goto.clone();
+                        }
+                    } else {
+                        ui.label(label);
+                    }
+                });
+            }
+            if let Some(sel) = goto {
+                app.selection = sel;
+            }
+        });
 }
 
 /// Generic collapsible component section: lists names, handles selection, has an add row.
@@ -320,7 +394,7 @@ fn section_with_add(
                         .hint_text("name…")
                         .desired_width(110.0),
                 );
-                let add_clicked = ui.small_button("＋").clicked();
+                let add_clicked = ui.small_button("+").clicked();
                 if resp.changed() {
                     *get_buf(app) = buf_edit.clone();
                 }

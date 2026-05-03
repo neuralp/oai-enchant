@@ -2,6 +2,7 @@
 
 mod app;
 mod editors;
+mod lint;
 mod model;
 mod sidebar;
 
