@@ -3,6 +3,186 @@ use crate::lint::{self, Level};
 use crate::model::OpenApiSpec;
 use egui::RichText;
 
+// ── Search ────────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct SearchHit {
+    kind:       &'static str,
+    kind_color: egui::Color32,
+    label:      String,
+    excerpt:    String,
+    sel:        Selection,
+}
+
+fn excerpt(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        format!("{}…", s.chars().take(max).collect::<String>())
+    }
+}
+
+fn search_spec(spec: &OpenApiSpec, query: &str) -> Vec<SearchHit> {
+    let q = query.to_lowercase();
+    let mut hits: Vec<SearchHit> = Vec::new();
+
+    macro_rules! hit {
+        ($kind:expr, $color:expr, $label:expr, $exc:expr, $sel:expr) => {{
+            let label: String = $label;
+            let exc: String   = $exc;
+            if label.to_lowercase().contains(&q) || exc.to_lowercase().contains(&q) {
+                hits.push(SearchHit {
+                    kind:       $kind,
+                    kind_color: $color,
+                    label,
+                    excerpt:    exc,
+                    sel:        $sel,
+                });
+            }
+        }};
+    }
+
+    let grey   = egui::Color32::from_rgb(110, 110, 140);
+    let purple = egui::Color32::from_rgb(130, 100, 200);
+    let teal   = egui::Color32::from_rgb(60,  160, 160);
+    let orange = egui::Color32::from_rgb(200, 130, 60);
+    let blue   = egui::Color32::from_rgb(80,  140, 220);
+    let green  = egui::Color32::from_rgb(80,  160, 100);
+    let pink   = egui::Color32::from_rgb(190, 100, 150);
+
+    // ── Info ──────────────────────────────────────────────────────────────────
+    hit!("INFO", grey,
+         spec.info.title.clone(),
+         excerpt(spec.info.description.as_deref().unwrap_or(""), 50),
+         Selection::Info);
+
+    // ── Tags ──────────────────────────────────────────────────────────────────
+    for tag in &spec.tags {
+        hit!("TAG", grey,
+             tag.name.clone(),
+             excerpt(tag.description.as_deref().unwrap_or(""), 50),
+             Selection::Tags);
+    }
+
+    // ── Servers ───────────────────────────────────────────────────────────────
+    for srv in &spec.servers {
+        hit!("SERVER", grey,
+             srv.url.clone(),
+             excerpt(srv.description.as_deref().unwrap_or(""), 50),
+             Selection::Servers);
+    }
+
+    // ── Paths & Operations ────────────────────────────────────────────────────
+    for (path_key, path_item) in &spec.paths {
+        hit!("PATH", green,
+             path_key.clone(),
+             excerpt(path_item.summary.as_deref()
+                     .or(path_item.description.as_deref())
+                     .unwrap_or(""), 50),
+             Selection::Path(path_key.clone()));
+
+        for (method, op) in path_item.operations() {
+            let label = format!("{method}  {path_key}");
+            let mut details = Vec::new();
+            if let Some(id) = &op.operation_id { details.push(id.as_str()); }
+            if let Some(s)  = &op.summary      { details.push(s.as_str()); }
+            if let Some(d)  = &op.description  { details.push(d.as_str()); }
+            let exc = excerpt(&details.join(" · "), 55);
+            hit!("OPER", method_color(method),
+                 label,
+                 exc,
+                 Selection::Operation(path_key.clone(), method.to_string()));
+
+            // Parameters on the operation
+            for p in &op.parameters {
+                if let Some(param) = p.as_item() {
+                    let pname = format!("{method}  {path_key}  › {}", param.name);
+                    let pdesc = excerpt(param.description.as_deref().unwrap_or(""), 45);
+                    hit!("PARAM", teal, pname, pdesc,
+                         Selection::Operation(path_key.clone(), method.to_string()));
+                }
+            }
+        }
+    }
+
+    // ── Component: Schemas ────────────────────────────────────────────────────
+    if let Some(comps) = &spec.components {
+        for (name, schema_ref) in &comps.schemas {
+            if let Some(schema) = schema_ref.as_item() {
+                let desc = schema.description.as_deref()
+                    .or(schema.title.as_deref())
+                    .unwrap_or("");
+                hit!("SCHEMA", purple,
+                     name.clone(),
+                     excerpt(desc, 50),
+                     Selection::Schema(name.clone()));
+
+                // Properties
+                for (prop_name, prop_schema) in &schema.properties {
+                    let plabel = format!("{name}  › {prop_name}");
+                    let pdesc  = excerpt(prop_schema.description.as_deref().unwrap_or(""), 45);
+                    hit!("PROP", purple, plabel, pdesc,
+                         Selection::Schema(name.clone()));
+                }
+            }
+        }
+
+        // ── Component: Request Bodies ─────────────────────────────────────────
+        for (name, rb_ref) in &comps.request_bodies {
+            if let Some(rb) = rb_ref.as_item() {
+                hit!("REQ BODY", orange,
+                     name.clone(),
+                     excerpt(rb.description.as_deref().unwrap_or(""), 50),
+                     Selection::RequestBody(name.clone()));
+            }
+        }
+
+        // ── Component: Responses ──────────────────────────────────────────────
+        for (name, resp_ref) in &comps.responses {
+            if let Some(resp) = resp_ref.as_item() {
+                hit!("RESPONSE", blue,
+                     name.clone(),
+                     excerpt(&resp.description, 50),
+                     Selection::ComponentResponse(name.clone()));
+            }
+        }
+
+        // ── Component: Parameters ─────────────────────────────────────────────
+        for (name, param_ref) in &comps.parameters {
+            if let Some(param) = param_ref.as_item() {
+                let exc = excerpt(param.description.as_deref().unwrap_or(""), 50);
+                hit!("PARAM", teal, name.clone(), exc,
+                     Selection::ComponentParameter(name.clone()));
+            }
+        }
+
+        // ── Component: Examples ───────────────────────────────────────────────
+        for (name, ex_ref) in &comps.examples {
+            if let Some(ex) = ex_ref.as_item() {
+                let mut details = Vec::new();
+                if let Some(s) = &ex.summary     { details.push(s.as_str()); }
+                if let Some(d) = &ex.description { details.push(d.as_str()); }
+                hit!("EXAMPLE", pink,
+                     name.clone(),
+                     excerpt(&details.join(" · "), 50),
+                     Selection::Example(name.clone()));
+            }
+        }
+
+        // ── Component: Security Schemes ───────────────────────────────────────
+        for (name, ss_ref) in &comps.security_schemes {
+            if let Some(ss) = ss_ref.as_item() {
+                hit!("SEC SCHEME", grey,
+                     name.clone(),
+                     excerpt(ss.description.as_deref().unwrap_or(&ss.type_), 50),
+                     Selection::SecurityScheme(name.clone()));
+            }
+        }
+    }
+
+    hits
+}
+
 const METHOD_COLORS: &[(&str, egui::Color32)] = &[
     ("GET",     egui::Color32::from_rgb(97,  175, 95)),
     ("POST",    egui::Color32::from_rgb(73,  135, 230)),
@@ -73,13 +253,100 @@ impl SidebarData {
 }
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
+    // ── Search box (fixed, above the scroll area) ─────────────────────────────
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("🔍").size(14.0));
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut app.search_query)
+                .id(egui::Id::new("sidebar_search"))
+                .hint_text("Search spec…  (Ctrl+F)")
+                .desired_width(f32::INFINITY),
+        );
+        if !app.search_query.is_empty() {
+            if ui.small_button("✕").on_hover_text("Clear search").clicked() {
+                app.search_query.clear();
+                resp.request_focus();
+            }
+        }
+    });
+    ui.separator();
+
+    // ── Content ───────────────────────────────────────────────────────────────
+    // Collect search hits before borrowing ui for the scroll area.
+    let hits: Vec<SearchHit> = if !app.search_query.is_empty() {
+        app.spec.as_ref()
+            .map(|spec| search_spec(spec, &app.search_query))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     egui::ScrollArea::vertical()
         .id_salt("sidebar_scroll")
         .show(ui, |ui| {
-            let Some(spec) = app.spec.as_ref() else { return };
-            let data = SidebarData::from_spec(spec); // owns all strings; releases spec borrow
-            show_tree(ui, app, &data);
+            if app.search_query.is_empty() {
+                let Some(spec) = app.spec.as_ref() else { return };
+                let data = SidebarData::from_spec(spec);
+                show_tree(ui, app, &data);
+            } else {
+                show_search_results(ui, app, &hits);
+            }
         });
+}
+
+fn show_search_results(ui: &mut egui::Ui, app: &mut App, hits: &[SearchHit]) {
+    if hits.is_empty() {
+        ui.add_space(8.0);
+        ui.label(RichText::new("  No results found.").weak().italics());
+        return;
+    }
+
+    ui.add_space(4.0);
+    ui.label(RichText::new(format!("  {} result{}", hits.len(), if hits.len() == 1 { "" } else { "s" })).weak().small());
+    ui.add_space(2.0);
+
+    let mut navigate_to: Option<Selection> = None;
+
+    for hit in hits {
+        let is_sel = app.selection == hit.sel;
+        ui.horizontal(|ui| {
+            // Kind badge
+            let badge = RichText::new(hit.kind)
+                .small()
+                .monospace()
+                .color(hit.kind_color);
+            ui.label(badge);
+
+            // Label + excerpt as a single clickable row
+            let line = if hit.excerpt.is_empty() {
+                hit.label.clone()
+            } else {
+                format!("{}\n{}", hit.label, hit.excerpt)
+            };
+
+            let resp = ui.selectable_label(is_sel, RichText::new(&hit.label).small().strong());
+            if resp.clicked() {
+                navigate_to = Some(hit.sel.clone());
+            }
+            if !hit.excerpt.is_empty() {
+                resp.on_hover_text(&hit.excerpt);
+            }
+            let _ = line; // suppress warning
+        });
+
+        // Excerpt on second line if present
+        if !hit.excerpt.is_empty() {
+            ui.label(RichText::new(format!("    {}", hit.excerpt)).small().weak());
+        }
+
+        ui.add_space(1.0);
+    }
+
+    if let Some(sel) = navigate_to {
+        app.selection = sel;
+        app.search_query.clear();
+    }
 }
 
 fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
@@ -162,6 +429,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
     .id_salt("sb_paths")
     .default_open(true)
     .show(ui, |ui| {
+        let mut dup_path: Option<String> = None;
+        let mut del_path: Option<String> = None;
+
         for (path_str, methods) in &data.paths {
             let path_sel = app.selection == Selection::Path(path_str.clone());
             let any_op_sel = methods.iter().any(|m| {
@@ -174,7 +444,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 ui.visuals().text_color()
             };
 
-            egui::CollapsingHeader::new(
+            let cr = egui::CollapsingHeader::new(
                 RichText::new(path_str.as_str()).monospace().color(hdr_color),
             )
             .id_salt(format!("sb_path_{path_str}"))
@@ -213,7 +483,23 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                     });
                 }
             });
+
+            let ps = path_str.clone();
+            cr.header_response.context_menu(|ui| {
+                if ui.button("Duplicate").clicked() {
+                    dup_path = Some(ps.clone());
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button(RichText::new("Delete").color(egui::Color32::from_rgb(220, 80, 80))).clicked() {
+                    del_path = Some(ps.clone());
+                    ui.close_menu();
+                }
+            });
         }
+
+        if let Some(p) = dup_path { app.duplicate_path(&p); }
+        if let Some(p) = del_path  { app.delete_path(&p); }
 
         // Add path row
         ui.add_space(2.0);
@@ -242,6 +528,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 "sb_schemas", &data.schema_names,
                 |n| Selection::Schema(n), |app, n| app.add_schema(n),
                 |app| &mut app.new_item.schema_name,
+                |app, n| app.duplicate_schema(&n),
+                |app, n| app.delete_schema(&n),
+                &[("Add default paths", |app, n| app.add_default_paths_for_schema(n))],
             );
 
             // Request Bodies
@@ -250,6 +539,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 "sb_reqbodies", &data.rb_names,
                 |n| Selection::RequestBody(n), |app, n| app.add_request_body(n),
                 |app| &mut app.new_item.request_body_name,
+                |app, n| app.duplicate_request_body(&n),
+                |app, n| app.delete_request_body(&n),
+                &[],
             );
 
             // Responses
@@ -258,6 +550,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 "sb_responses", &data.resp_names,
                 |n| Selection::ComponentResponse(n), |app, n| app.add_component_response(n),
                 |app| &mut app.new_item.response_name,
+                |app, n| app.duplicate_component_response(&n),
+                |app, n| app.delete_component_response(&n),
+                &[],
             );
 
             // Parameters
@@ -266,6 +561,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 "sb_parameters", &data.param_names,
                 |n| Selection::ComponentParameter(n), |app, n| app.add_component_parameter(n),
                 |app| &mut app.new_item.parameter_name,
+                |app, n| app.duplicate_component_parameter(&n),
+                |app, n| app.delete_component_parameter(&n),
+                &[],
             );
 
             // Examples
@@ -274,6 +572,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 "sb_examples", &data.ex_names,
                 |n| Selection::Example(n), |app, n| app.add_example(n),
                 |app| &mut app.new_item.example_name,
+                |app, n| app.duplicate_example(&n),
+                |app, n| app.delete_example(&n),
+                &[],
             );
 
             // Headers (display only)
@@ -366,6 +667,7 @@ fn show_diagnostics(ui: &mut egui::Ui, app: &mut App, diags: &[lint::Diagnostic]
 
 /// Generic collapsible component section: lists names, handles selection, has an add row.
 /// Uses function pointers to avoid borrow issues with &mut App fields.
+/// `extra_actions` adds additional context-menu items between Duplicate and Delete.
 fn section_with_add(
     ui: &mut egui::Ui,
     app: &mut App,
@@ -375,15 +677,48 @@ fn section_with_add(
     make_sel: fn(String) -> Selection,
     add_fn: fn(&mut App, String),
     get_buf: fn(&mut App) -> &mut String,
+    duplicate_fn: fn(&mut App, String),
+    delete_fn: fn(&mut App, String),
+    extra_actions: &[(&'static str, fn(&mut App, String))],
 ) {
+    let mut dup_name: Option<String> = None;
+    let mut del_name: Option<String> = None;
+    // (action_index, item_name) — deferred so we apply it after the borrow ends.
+    let mut extra_action: Option<(usize, String)> = None;
+
     egui::CollapsingHeader::new(format!("  {label}"))
         .id_salt(id_salt)
         .show(ui, |ui| {
             for name in names {
                 let sel = app.selection == make_sel(name.clone());
-                if ui.selectable_label(sel, format!("    {name}")).clicked() {
+                let resp = ui.selectable_label(sel, format!("    {name}"));
+                if resp.clicked() {
                     app.selection = make_sel(name.clone());
                 }
+                let n = name.clone();
+                resp.context_menu(|ui| {
+                    if ui.button("Duplicate").clicked() {
+                        dup_name = Some(n.clone());
+                        ui.close_menu();
+                    }
+                    if !extra_actions.is_empty() {
+                        ui.separator();
+                        for (idx, (act_label, _)) in extra_actions.iter().enumerate() {
+                            if ui.button(*act_label).clicked() {
+                                extra_action = Some((idx, n.clone()));
+                                ui.close_menu();
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .button(RichText::new("Delete").color(egui::Color32::from_rgb(220, 80, 80)))
+                        .clicked()
+                    {
+                        del_name = Some(n.clone());
+                        ui.close_menu();
+                    }
+                });
             }
             // Split borrows: copy buffer value, call add_fn if clicked
             let buf_val = get_buf(app).clone();
@@ -404,4 +739,8 @@ fn section_with_add(
                 }
             });
         });
+
+    if let Some(n) = dup_name { duplicate_fn(app, n); }
+    if let Some(n) = del_name { delete_fn(app, n); }
+    if let Some((idx, n)) = extra_action { extra_actions[idx].1(app, n); }
 }

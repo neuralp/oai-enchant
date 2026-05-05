@@ -1,6 +1,7 @@
 use crate::app::{NewItemBuffers, Selection};
 use crate::model::*;
 use egui::{Grid, RichText, ScrollArea, Ui};
+use indexmap::IndexMap;
 use serde_json::Value;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -859,8 +860,12 @@ fn edit_operation(
     ui.heading(format!("{method} {path}"));
     ui.add_space(4.0);
 
-    // Collect defined tag names before mutably borrowing spec.paths.
+    // Collect read-only data from spec before taking the mutable path borrow.
     let defined_tags: Vec<String> = spec.tags.iter().map(|t| t.name.clone()).collect();
+    let security_scheme_names: Vec<String> = spec.components.as_ref()
+        .map(|c| c.security_schemes.keys().cloned().collect())
+        .unwrap_or_default();
+    let global_security = spec.security.clone();
 
     let Some(item) = spec.paths.get_mut(path) else {
         ui.label("Path not found.");
@@ -932,6 +937,10 @@ fn edit_operation(
         }
         r
     };
+
+    // Security
+    section_header(ui, "Security");
+    ch |= edit_operation_security(ui, op, &security_scheme_names, &global_security);
 
     // Parameters
     section_header(ui, "Parameters");
@@ -1057,6 +1066,200 @@ fn edit_operation(
             ch = true;
         }
     });
+
+    ch
+}
+
+// ── Operation security editor ─────────────────────────────────────────────────
+
+fn edit_operation_security(
+    ui: &mut Ui,
+    op: &mut Operation,
+    available_schemes: &[String],
+    global_security: &[IndexMap<String, Vec<String>>],
+) -> bool {
+    use indexmap::IndexMap;
+    let mut ch = false;
+
+    let state: usize = match &op.security {
+        None                        => 0,
+        Some(v) if v.is_empty()     => 1,
+        Some(_)                     => 2,
+    };
+
+    // ── State selector ────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        if ui.radio(state == 0, "Inherit global").on_hover_text(
+            "Use the spec-level security declaration. Most operations should use this."
+        ).clicked() && state != 0 {
+            op.security = None;
+            ch = true;
+        }
+        if ui.radio(state == 1, "Disabled").on_hover_text(
+            "Explicitly require no authentication for this operation (sets security: [])."
+        ).clicked() && state != 1 {
+            op.security = Some(vec![]);
+            ch = true;
+        }
+        if ui.radio(state == 2, "Custom").on_hover_text(
+            "Override security for this operation with specific schemes."
+        ).clicked() && state != 2 {
+            let init_req = if !available_schemes.is_empty() {
+                let mut m = IndexMap::new();
+                m.insert(available_schemes[0].clone(), vec![]);
+                m
+            } else {
+                IndexMap::new()
+            };
+            op.security = Some(vec![init_req]);
+            ch = true;
+        }
+    });
+
+    // ── State-specific UI ─────────────────────────────────────────────────────
+    match state {
+        0 => {
+            // Show what global security resolves to.
+            if global_security.is_empty() {
+                ui.label(
+                    RichText::new("  ↳ No global security defined — this operation is open.")
+                        .weak().small().italics(),
+                );
+            } else {
+                let preview: Vec<String> = global_security.iter().map(|req| {
+                    req.keys().cloned().collect::<Vec<_>>().join(" + ")
+                }).collect();
+                ui.label(
+                    RichText::new(format!("  ↳ Global: {}", preview.join("  |  ")))
+                        .weak().small(),
+                );
+            }
+        }
+
+        1 => {
+            ui.label(
+                RichText::new("  ↳ No authentication required for this operation.")
+                    .weak().small().italics(),
+            );
+        }
+
+        _ => {
+            // Custom requirements editor.
+            if available_schemes.is_empty() {
+                ui.label(
+                    RichText::new("  No security schemes defined in Components → Security Schemes.")
+                        .color(egui::Color32::from_rgb(220, 160, 60)).small(),
+                );
+            }
+
+            if let Some(requirements) = op.security.as_mut() {
+                let mut req_to_remove: Option<usize> = None;
+
+                let req_count = requirements.len();
+                for (req_idx, requirement) in requirements.iter_mut().enumerate() {
+                    ui.push_id(req_idx, |ui| {
+                        ui.add_space(4.0);
+
+                        // Row label for multiple OR options.
+                        let row_label = if req_count > 1 {
+                            format!("Option {}  (OR):", req_idx + 1)
+                        } else {
+                            "Schemes:".to_owned()
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(&row_label).small().weak());
+
+                            // Scheme chips — click to remove.
+                            let scheme_names: Vec<String> = requirement.keys().cloned().collect();
+                            let mut to_remove_scheme: Option<String> = None;
+
+                            for scheme_name in &scheme_names {
+                                if ui.selectable_label(
+                                    true,
+                                    RichText::new(format!("{scheme_name}  ×"))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(80, 140, 220)),
+                                ).on_hover_text("Click to remove").clicked() {
+                                    to_remove_scheme = Some(scheme_name.clone());
+                                    ch = true;
+                                }
+                            }
+                            if let Some(name) = to_remove_scheme {
+                                requirement.shift_remove(&name);
+                            }
+
+                            // Dropdown to add a scheme not yet in this requirement.
+                            let unused: Vec<&str> = available_schemes.iter()
+                                .filter(|s| !requirement.contains_key(s.as_str()))
+                                .map(|s| s.as_str())
+                                .collect();
+                            if !unused.is_empty() {
+                                ui.menu_button(RichText::new("+ scheme").small(), |ui| {
+                                    for name in &unused {
+                                        if ui.button(*name).clicked() {
+                                            requirement.insert(name.to_string(), vec![]);
+                                            ch = true;
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+                            }
+
+                            if ui.small_button("🗑").on_hover_text("Remove this option").clicked() {
+                                req_to_remove = Some(req_idx);
+                                ch = true;
+                            }
+                        });
+
+                        // Scope editor — one compact line per scheme.
+                        for (scheme_name, scopes) in requirement.iter_mut() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                ui.label(
+                                    RichText::new(format!("{scheme_name} scopes:"))
+                                        .small().weak(),
+                                );
+                                let mut scope_str = scopes.join(", ");
+                                let r = ui.add(
+                                    egui::TextEdit::singleline(&mut scope_str)
+                                        .hint_text("scope1, scope2 … (leave empty if unused)")
+                                        .desired_width(230.0),
+                                );
+                                if r.changed() {
+                                    *scopes = scope_str
+                                        .split(',')
+                                        .map(|s| s.trim().to_owned())
+                                        .filter(|s| !s.is_empty())
+                                        .collect();
+                                    ch = true;
+                                }
+                            });
+                        }
+                    });
+                }
+
+                if let Some(idx) = req_to_remove {
+                    requirements.remove(idx);
+                }
+
+                // Add another OR option.
+                ui.add_space(2.0);
+                if ui.small_button("+ Add OR option").on_hover_text(
+                    "Add an alternative set of schemes (any one option is sufficient)."
+                ).clicked() {
+                    let new_req = if !available_schemes.is_empty() {
+                        let mut m = IndexMap::new();
+                        m.insert(available_schemes[0].clone(), vec![]);
+                        m
+                    } else {
+                        IndexMap::new()
+                    };
+                    requirements.push(new_req);
+                    ch = true;
+                }
+            }
+        }
+    }
 
     ch
 }

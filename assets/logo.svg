@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 140" width="240" height="140">
+  <defs>
+    <linearGradient id="wand" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#7A5510"/>
+      <stop offset="45%"  stop-color="#C8A84B"/>
+      <stop offset="100%" stop-color="#E8C870"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#1A1A2E"/>
+      <stop offset="100%" stop-color="#16162A"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="240" height="140" rx="10" fill="url(#bg)"/>
+
+  <!-- Subtle grid lines -->
+  <line x1="0" y1="70" x2="240" y2="70" stroke="#ffffff" stroke-opacity="0.03" stroke-width="1"/>
+  <line x1="120" y1="0" x2="120" y2="140" stroke="#ffffff" stroke-opacity="0.03" stroke-width="1"/>
+
+  <!-- Wand shaft -->
+  <line x1="18" y1="118" x2="72" y2="22"
+        stroke="url(#wand)" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- Wand sparkle: 4-point star at tip (72, 22) -->
+  <g filter="url(#glow)">
+    <line x1="59" y1="22" x2="85" y2="22"
+          stroke="#FFD940" stroke-width="4" stroke-linecap="round"/>
+    <line x1="72" y1="9"  x2="72" y2="35"
+          stroke="#FFD940" stroke-width="4" stroke-linecap="round"/>
+    <line x1="63" y1="13" x2="81" y2="31"
+          stroke="#FFD940" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="81" y1="13" x2="63" y2="31"
+          stroke="#FFD940" stroke-width="2.5" stroke-linecap="round"/>
+  </g>
+
+  <!-- Satellite sparkles -->
+  <circle cx="88"  cy="10" r="2.5" fill="#FFD940" opacity="0.85"/>
+  <circle cx="92"  cy="30" r="1.8" fill="#FFD940" opacity="0.60"/>
+  <circle cx="57"  cy="10" r="1.8" fill="#FFD940" opacity="0.60"/>
+  <circle cx="100" cy="18" r="1.2" fill="#FFD940" opacity="0.40"/>
+
+  <!-- Section divider -->
+  <line x1="106" y1="12" x2="106" y2="128"
+        stroke="#ffffff" stroke-opacity="0.12" stroke-width="1"/>
+
+  <!-- Magic trail from wand tip to API section -->
+  <line x1="80" y1="35" x2="106" y2="68"
+        stroke="#FFD940" stroke-opacity="0.25" stroke-width="1"
+        stroke-dasharray="4,4"/>
+
+  <!-- ── API Endpoints ─────────────────────────────────── -->
+
+  <!-- GET -->
+  <rect x="112" y="24" width="44" height="20" rx="3" fill="#4A9F5A"/>
+  <text x="134" y="38" font-family="monospace,Courier New" font-size="10"
+        fill="white" text-anchor="middle" font-weight="bold">GET</text>
+  <rect x="158" y="24" width="72" height="20" rx="3" fill="#2A2A40"/>
+  <text x="194" y="38" font-family="monospace,Courier New" font-size="9"
+        fill="#9090B8" text-anchor="middle">/users</text>
+
+  <!-- POST -->
+  <rect x="112" y="52" width="44" height="20" rx="3" fill="#3A6FCC"/>
+  <text x="134" y="66" font-family="monospace,Courier New" font-size="10"
+        fill="white" text-anchor="middle" font-weight="bold">POST</text>
+  <rect x="158" y="52" width="72" height="20" rx="3" fill="#2A2A40"/>
+  <text x="194" y="66" font-family="monospace,Courier New" font-size="9"
+        fill="#9090B8" text-anchor="middle">/users</text>
+
+  <!-- DELETE -->
+  <rect x="112" y="80" width="44" height="20" rx="3" fill="#B84040"/>
+  <text x="134" y="94" font-family="monospace,Courier New" font-size="9"
+        fill="white" text-anchor="middle" font-weight="bold">DELETE</text>
+  <rect x="158" y="80" width="72" height="20" rx="3" fill="#2A2A40"/>
+  <text x="194" y="94" font-family="monospace,Courier New" font-size="9"
+        fill="#9090B8" text-anchor="middle">/users/{id}</text>
+
+  <!-- Bottom label -->
+  <text x="120" y="122" font-family="system-ui,sans-serif" font-size="8"
+        fill="#ffffff" fill-opacity="0.30" text-anchor="middle"
+        letter-spacing="2">OAI ENCHANT</text>
+</svg>
