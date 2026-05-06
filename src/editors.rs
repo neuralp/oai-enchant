@@ -1800,6 +1800,44 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
                                     ch = true;
                                 }
                             });
+                            let has_enum = prop_schema.enum_.is_some();
+                            egui::CollapsingHeader::new("Enum Values")
+                                .id_salt(format!("{id}__penum__{prop_name}"))
+                                .default_open(has_enum)
+                                .show(ui, |ui| {
+                                    let count = prop_schema.enum_.as_ref().map_or(0, |v| v.len());
+                                    let mut remove_idx: Option<usize> = None;
+                                    for i in 0..count {
+                                        ui.horizontal(|ui| {
+                                            if ui.small_button("🗑").clicked() {
+                                                remove_idx = Some(i);
+                                            }
+                                            let mut s = {
+                                                let val = &prop_schema.enum_.as_ref().unwrap()[i];
+                                                match val {
+                                                    serde_json::Value::String(sv) => sv.clone(),
+                                                    other => serde_json::to_string(other).unwrap_or_default(),
+                                                }
+                                            };
+                                            if ui.add(egui::TextEdit::singleline(&mut s).desired_width(f32::INFINITY)).changed() {
+                                                prop_schema.enum_.as_mut().unwrap()[i] = serde_json::Value::String(s);
+                                                ch = true;
+                                            }
+                                        });
+                                    }
+                                    if let Some(idx) = remove_idx {
+                                        let vals = prop_schema.enum_.as_mut().unwrap();
+                                        vals.remove(idx);
+                                        if vals.is_empty() {
+                                            prop_schema.enum_ = None;
+                                        }
+                                        ch = true;
+                                    }
+                                    if ui.small_button("+ Add").clicked() {
+                                        prop_schema.enum_.get_or_insert_with(Vec::new).push(serde_json::Value::String(String::new()));
+                                        ch = true;
+                                    }
+                                });
                         }
 
                         // Number/Integer-specific fields
@@ -1848,6 +1886,33 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
                                 if excl_bound_field(ui, &mut prop_schema.exclusive_minimum, 55.0, "number") { ch = true; }
                                 ui.label("ExclMax:");
                                 if excl_bound_field(ui, &mut prop_schema.exclusive_maximum, 55.0, "number") { ch = true; }
+                            });
+                        }
+
+                        // Boolean-specific fields
+                        if ptype == "boolean" && prop_schema.ref_.is_none() {
+                            ui.horizontal(|ui| {
+                                ui.label("Default:");
+                                let cur = match &prop_schema.default {
+                                    Some(serde_json::Value::Bool(true))  => "true",
+                                    Some(serde_json::Value::Bool(false)) => "false",
+                                    _                                    => "",
+                                };
+                                egui::ComboBox::from_id_salt(format!("{id}__pbool_default__{prop_name}"))
+                                    .selected_text(cur)
+                                    .width(70.0)
+                                    .show_ui(ui, |ui| {
+                                        for &opt in &["", "true", "false"] {
+                                            if ui.selectable_label(cur == opt, opt).clicked() {
+                                                prop_schema.default = match opt {
+                                                    "true"  => Some(serde_json::Value::Bool(true)),
+                                                    "false" => Some(serde_json::Value::Bool(false)),
+                                                    _       => None,
+                                                };
+                                                ch = true;
+                                            }
+                                        }
+                                    });
                             });
                         }
 
