@@ -2,7 +2,7 @@
 
 A native desktop OpenAPI specification editor built with Rust and [egui](https://github.com/emilk/egui), supporting OpenAPI versions up to 3.2.
 
-![OAI Enchant – Operation Editor](media/main_screenshot.png)
+![OAI Enchant – Operation Editor](assets/main_screenshot.png)
 
 ## Features
 
@@ -10,7 +10,7 @@ A native desktop OpenAPI specification editor built with Rust and [egui](https:/
 - **Operation editor** — edit operation ID, summary, description, tags (via chip selector), deprecated toggle, parameters, request body (with content types), and responses
 - **Schema editor** — supports regular and composition schemas (allOf / anyOf / oneOf) with inline and `$ref` entries; per-property controls for type, format, pattern, default, example, min/max length, required, and deprecated toggles
 
-![OAI Enchant – Schema Editor](media/schema_editor.png)
+![OAI Enchant – Schema Editor](assets/schema_editor.png)
 
 - **Raw text editor** — view and edit the spec as YAML or JSON with syntax highlighting; parse-and-apply writes changes back to the in-memory model
 - **Inline linter** — errors and warnings displayed in the sidebar, covering missing titles, broken `$ref` pointers, missing operationIds, undeclared tags, path-parameter mismatches, duplicate operationIds, and more

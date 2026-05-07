@@ -14,6 +14,7 @@ pub enum Selection {
     Info,
     Servers,
     Tags,
+    Tag(String),
     ExternalDocs,
     Path(String),
     Operation(String, String), // path, method
@@ -37,7 +38,6 @@ pub struct NewItemBuffers {
     pub response_name: String,
     pub parameter_name: String,
     pub example_name: String,
-    pub response_code: String,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -1041,6 +1041,22 @@ impl eframe::App for App {
                     }) {
                         self.selection = Selection::Path(new_path);
                     }
+                }
+                // Navigate to an operation if the path editor's Edit link was clicked.
+                if let Some((path, method)) = ui.data_mut(|d| {
+                    d.remove_temp::<(String, String)>(egui::Id::new("oa_navigate_operation"))
+                }) {
+                    self.selection = Selection::Operation(path, method);
+                }
+                // Keep selection in sync when a tag is renamed.
+                if let Some(new_name) = ui.data_mut(|d| {
+                    d.remove_temp::<String>(egui::Id::new("oa_tag_renamed"))
+                }) {
+                    self.selection = Selection::Tag(new_name);
+                }
+                // Navigate away when a tag is deleted.
+                if ui.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("oa_tag_deleted"))).unwrap_or(false) {
+                    self.selection = Selection::Tags;
                 }
             }
         });

@@ -19,15 +19,17 @@ pub fn show(
         let mk = |prefix: &str, keys: Vec<&str>| -> Vec<String> {
             keys.into_iter().map(|k| format!("{prefix}{k}")).collect()
         };
-        let schema_refs = comps.map(|c| mk("#/components/schemas/", c.schemas.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
-        let param_refs  = comps.map(|c| mk("#/components/parameters/", c.parameters.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
-        let resp_refs   = comps.map(|c| mk("#/components/responses/", c.responses.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
-        let rb_refs     = comps.map(|c| mk("#/components/requestBodies/", c.request_bodies.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        let schema_refs   = comps.map(|c| mk("#/components/schemas/",       c.schemas.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        let param_refs    = comps.map(|c| mk("#/components/parameters/",    c.parameters.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        let resp_refs     = comps.map(|c| mk("#/components/responses/",     c.responses.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        let rb_refs       = comps.map(|c| mk("#/components/requestBodies/", c.request_bodies.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
+        let example_refs  = comps.map(|c| mk("#/components/examples/",      c.examples.keys().map(|k| k.as_str()).collect())).unwrap_or_default();
         ui.data_mut(|d| {
-            d.insert_temp(egui::Id::new("oa_schema_refs"), schema_refs);
-            d.insert_temp(egui::Id::new("oa_param_refs"),  param_refs);
-            d.insert_temp(egui::Id::new("oa_resp_refs"),   resp_refs);
-            d.insert_temp(egui::Id::new("oa_rb_refs"),     rb_refs);
+            d.insert_temp(egui::Id::new("oa_schema_refs"),   schema_refs);
+            d.insert_temp(egui::Id::new("oa_param_refs"),    param_refs);
+            d.insert_temp(egui::Id::new("oa_resp_refs"),     resp_refs);
+            d.insert_temp(egui::Id::new("oa_rb_refs"),       rb_refs);
+            d.insert_temp(egui::Id::new("oa_example_refs"),  example_refs);
         });
     }
 
@@ -43,6 +45,10 @@ pub fn show(
             Selection::Info => changed = edit_info(ui, spec),
             Selection::Servers => changed = edit_servers(ui, spec),
             Selection::Tags => changed = edit_tags(ui, spec),
+            Selection::Tag(name) => {
+                let name = name.clone();
+                changed = edit_tag_view(ui, spec, &name);
+            }
             Selection::ExternalDocs => changed = edit_external_docs(ui, spec),
             Selection::Path(p) => {
                 let path = p.clone();
@@ -749,6 +755,102 @@ fn edit_tags(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
     ch
 }
 
+fn edit_tag_view(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
+    ui.heading(format!("Tag: {name}"));
+    ui.add_space(4.0);
+
+    let Some(idx) = spec.tags.iter().position(|t| t.name == name) else {
+        ui.label(RichText::new("Tag not found.").weak());
+        return false;
+    };
+
+    let mut ch = false;
+
+    // ── Editor ────────────────────────────────────────────────────────────────
+    let old_name = spec.tags[idx].name.clone();
+    ch |= form_grid(ui, "tag_view_grid", |ui| {
+        let mut c = false;
+        c |= row_str(ui, "Name:", &mut spec.tags[idx].name);
+        c |= row_opt_multiline(ui, "Description:", &mut spec.tags[idx].description);
+        c
+    });
+
+    let new_name = spec.tags[idx].name.clone();
+    if new_name != old_name {
+        for path_item in spec.paths.values_mut() {
+            for method in ["GET","PUT","POST","DELETE","OPTIONS","HEAD","PATCH","TRACE"] {
+                if let Some(op) = path_item.operation_mut(method) {
+                    for t in op.tags.iter_mut() {
+                        if t.as_str() == old_name { *t = new_name.clone(); }
+                    }
+                }
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_tag_renamed"), new_name.clone()));
+    }
+
+    if ui.small_button("🗑 Delete Tag").clicked() {
+        for path_item in spec.paths.values_mut() {
+            for method in ["GET","PUT","POST","DELETE","OPTIONS","HEAD","PATCH","TRACE"] {
+                if let Some(op) = path_item.operation_mut(method) {
+                    op.tags.retain(|t| t.as_str() != name);
+                }
+            }
+        }
+        spec.tags.remove(idx);
+        ch = true;
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_tag_deleted"), true));
+        return ch;
+    }
+
+    ui.separator();
+
+    // ── Operations that use this tag ──────────────────────────────────────────
+    section_header(ui, "Operations");
+
+    let display_name = new_name.as_str();
+
+    let method_color = |m: &str| match m {
+        "GET"    => egui::Color32::from_rgb( 97, 175,  95),
+        "POST"   => egui::Color32::from_rgb(100, 149, 237),
+        "PUT"    => egui::Color32::from_rgb(229, 152,  61),
+        "DELETE" => egui::Color32::from_rgb(220,  80,  80),
+        "PATCH"  => egui::Color32::from_rgb(180, 120, 220),
+        _        => egui::Color32::GRAY,
+    };
+
+    let mut any = false;
+    for (path_key, path_item) in &spec.paths {
+        for (method, op) in path_item.operations() {
+            if !op.tags.iter().any(|t| t == display_name) { continue; }
+            any = true;
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{method:7}"))
+                        .monospace()
+                        .color(method_color(method)),
+                );
+                ui.label(RichText::new(path_key).monospace());
+                if let Some(s) = &op.summary {
+                    ui.label(RichText::new(format!("— {s}")).weak());
+                }
+                if ui.link("Edit").clicked() {
+                    ui.data_mut(|d| d.insert_temp(
+                        egui::Id::new("oa_navigate_operation"),
+                        (path_key.to_string(), method.to_string()),
+                    ));
+                }
+            });
+        }
+    }
+
+    if !any {
+        ui.label(RichText::new("No operations use this tag.").weak().italics());
+    }
+
+    ch
+}
+
 fn edit_external_docs(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
     ui.heading("External Docs");
     let docs = spec.external_docs.get_or_insert_with(ExternalDocs::default);
@@ -840,6 +942,12 @@ fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, _new_item: &mut Ne
                 if ui.small_button("🗑 Remove").clicked() {
                     item.set_operation(method, None);
                     ch = true;
+                }
+                if ui.link("Edit").clicked() {
+                    ui.data_mut(|d| d.insert_temp(
+                        egui::Id::new("oa_navigate_operation"),
+                        (path.to_string(), method.to_string()),
+                    ));
                 }
             } else if ui.small_button("+ Add").clicked() {
                 item.set_operation(method, Some(Operation::default()));
@@ -1050,20 +1158,40 @@ fn edit_operation(
         ch = true;
     }
 
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut new_item.response_code)
-                .hint_text("200")
-                .desired_width(60.0),
-        );
-        if ui.small_button("+ Add Response").clicked() && !new_item.response_code.is_empty() {
-            let code = new_item.response_code.clone();
-            new_item.response_code.clear();
-            op.responses.insert(code, RefOr::Item(Response {
-                description: "OK".to_string(),
-                ..Default::default()
-            }));
-            ch = true;
+    ui.menu_button("+ Add Response", |ui| {
+        for &(code, desc) in &[
+            ("200", "OK"),
+            ("201", "Created"),
+            ("202", "Accepted"),
+            ("204", "No Content"),
+            ("301", "Moved Permanently"),
+            ("302", "Found"),
+            ("304", "Not Modified"),
+            ("400", "Bad Request"),
+            ("401", "Unauthorized"),
+            ("403", "Forbidden"),
+            ("404", "Not Found"),
+            ("405", "Method Not Allowed"),
+            ("409", "Conflict"),
+            ("410", "Gone"),
+            ("422", "Unprocessable Entity"),
+            ("429", "Too Many Requests"),
+            ("500", "Internal Server Error"),
+            ("502", "Bad Gateway"),
+            ("503", "Service Unavailable"),
+            ("default", "Default"),
+        ] {
+            let already = op.responses.contains_key(code);
+            ui.add_enabled_ui(!already, |ui| {
+                if ui.button(format!("{code}  {desc}")).clicked() {
+                    op.responses.insert(code.to_string(), RefOr::Item(Response {
+                        description: desc.to_string(),
+                        ..Default::default()
+                    }));
+                    ch = true;
+                    ui.close_menu();
+                }
+            });
         }
     });
 
@@ -1332,17 +1460,43 @@ fn edit_request_body_item(ui: &mut Ui, body: &mut RequestBody, id: &str) -> bool
         ch = true;
     }
 
-    // Add content type
-    ui.horizontal(|ui| {
-        // Use egui memory for the ephemeral buffer
-        let buf_id = egui::Id::new(format!("{id}_new_ct"));
-        let mut buf: String = ui.data_mut(|d| d.get_temp::<String>(buf_id).unwrap_or_default());
-        ui.add(egui::TextEdit::singleline(&mut buf).hint_text("application/json").desired_width(180.0));
-        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if ui.small_button("+").clicked() && !buf.is_empty() {
-            body.content.entry(buf.clone()).or_default();
-            ui.data_mut(|d| d.insert_temp(buf_id, String::new()));
-            ch = true;
+    ui.menu_button("+ Add Content Type", |ui| {
+        let json_already = body.content.contains_key("application/json");
+        ui.add_enabled_ui(!json_already, |ui| {
+            ui.menu_button("application/json", |ui| {
+                if ui.button("Inline Object").clicked() {
+                    let mut media = MediaType::default();
+                    let mut schema = Schema::default();
+                    schema.set_type_str("object");
+                    media.schema = Some(RefOr::Item(schema));
+                    body.content.insert("application/json".to_string(), media);
+                    ch = true;
+                    ui.close_menu();
+                }
+                if ui.button("Schema Reference").clicked() {
+                    let mut media = MediaType::default();
+                    let mut schema = Schema::default();
+                    schema.ref_ = Some(String::new());
+                    media.schema = Some(RefOr::Item(schema));
+                    body.content.insert("application/json".to_string(), media);
+                    ch = true;
+                    ui.close_menu();
+                }
+            });
+        });
+        for &ct in &["application/x-www-form-urlencoded", "multipart/form-data"] {
+            let already = body.content.contains_key(ct);
+            ui.add_enabled_ui(!already, |ui| {
+                if ui.button(ct).clicked() {
+                    let mut media = MediaType::default();
+                    let mut schema = Schema::default();
+                    schema.set_type_str("object");
+                    media.schema = Some(RefOr::Item(schema));
+                    body.content.insert(ct.to_string(), media);
+                    ch = true;
+                    ui.close_menu();
+                }
+            });
         }
     });
 
@@ -1351,7 +1505,8 @@ fn edit_request_body_item(ui: &mut Ui, body: &mut RequestBody, id: &str) -> bool
 
 fn edit_media_type(ui: &mut Ui, media: &mut MediaType, id: &str) -> bool {
     let mut ch = false;
-    // Schema ref
+
+    // ── Schema ────────────────────────────────────────────────────────────────
     ui.label("Schema:");
     match &media.schema {
         None => {
@@ -1372,6 +1527,65 @@ fn edit_media_type(ui: &mut Ui, media: &mut MediaType, id: &str) -> bool {
             }
         }
     }
+
+    // ── Examples ──────────────────────────────────────────────────────────────
+    let example_refs: Vec<String> = ui.data(|d| {
+        d.get_temp::<Vec<String>>(egui::Id::new("oa_example_refs")).unwrap_or_default()
+    });
+
+    ui.separator();
+    ui.label(RichText::new("Examples:").strong());
+
+    let ex_keys: Vec<String> = media.examples.keys().cloned().collect();
+    let mut to_remove_ex: Option<String> = None;
+    for ex_key in &ex_keys {
+        ui.horizontal(|ui| {
+            if ui.small_button("🗑").clicked() { to_remove_ex = Some(ex_key.clone()); }
+            ui.label(RichText::new(ex_key).monospace());
+            if let Some(ex_val) = media.examples.get(ex_key) {
+                match ex_val {
+                    RefOr::Ref(r) => {
+                        let short = r.ref_.split('/').last().unwrap_or(&r.ref_);
+                        ui.label(RichText::new(format!("→ {short}")).weak());
+                    }
+                    RefOr::Item(_) => { ui.label(RichText::new("(inline)").weak()); }
+                }
+            }
+        });
+    }
+    if let Some(k) = to_remove_ex { media.examples.shift_remove(&k); ch = true; }
+
+    // Add a reference to a component example
+    if !example_refs.is_empty() {
+        ui.horizontal(|ui| {
+            let key_id = egui::Id::new(format!("{id}_ex_key"));
+            let ref_id = egui::Id::new(format!("{id}_ex_ref"));
+            let mut key: String = ui.data(|d| d.get_temp(key_id).unwrap_or_default());
+            let mut ref_sel: String = ui.data(|d| d.get_temp(ref_id).unwrap_or_default());
+
+            ui.add(egui::TextEdit::singleline(&mut key).hint_text("label").desired_width(90.0));
+            ui.data_mut(|d| d.insert_temp(key_id, key.clone()));
+
+            let short_sel = if ref_sel.is_empty() { "pick…" } else { ref_sel.split('/').last().unwrap_or("pick…") };
+            egui::ComboBox::from_id_salt(egui::Id::new(format!("{id}_ex_combo")))
+                .selected_text(short_sel)
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for rp in &example_refs {
+                        let short = rp.split('/').last().unwrap_or(rp.as_str());
+                        if ui.selectable_label(ref_sel == *rp, short).clicked() { ref_sel = rp.clone(); }
+                    }
+                });
+            ui.data_mut(|d| d.insert_temp(ref_id, ref_sel.clone()));
+
+            if ui.small_button("+ Link").clicked() && !key.is_empty() && !ref_sel.is_empty() {
+                media.examples.insert(key.clone(), RefOr::Ref(Ref { ref_: ref_sel.clone(), summary: None, description: None }));
+                ui.data_mut(|d| { d.insert_temp(key_id, String::new()); d.insert_temp(ref_id, String::new()); });
+                ch = true;
+            }
+        });
+    }
+
     ch
 }
 
@@ -1413,15 +1627,29 @@ fn edit_response_item(ui: &mut Ui, resp: &mut Response, id: &str) -> bool {
         ch = true;
     }
 
-    ui.horizontal(|ui| {
-        let buf_id = egui::Id::new(format!("{id}_new_ct"));
-        let mut buf: String = ui.data_mut(|d| d.get_temp::<String>(buf_id).unwrap_or_default());
-        ui.add(egui::TextEdit::singleline(&mut buf).hint_text("application/json").desired_width(180.0));
-        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if ui.small_button("+").clicked() && !buf.is_empty() {
-            resp.content.entry(buf.clone()).or_default();
-            ui.data_mut(|d| d.insert_temp(buf_id, String::new()));
-            ch = true;
+    ui.menu_button("+ Add Content Type", |ui| {
+        for &(ct, init_object) in &[
+            ("application/json",       true),
+            ("text/plain",             false),
+            ("text/html",              false),
+            ("application/xml",        false),
+            ("application/octet-stream", false),
+            ("application/pdf",        false),
+        ] {
+            let already = resp.content.contains_key(ct);
+            ui.add_enabled_ui(!already, |ui| {
+                if ui.button(ct).clicked() {
+                    let mut media = MediaType::default();
+                    if init_object {
+                        let mut schema = Schema::default();
+                        schema.set_type_str("object");
+                        media.schema = Some(RefOr::Item(schema));
+                    }
+                    resp.content.insert(ct.to_string(), media);
+                    ch = true;
+                    ui.close_menu();
+                }
+            });
         }
     });
 
@@ -2264,9 +2492,72 @@ fn edit_component_parameter_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &
     }
 }
 
+fn example_uses(spec: &OpenApiSpec, ref_path: &str) -> Vec<(String, Option<(String, String)>)> {
+    let mut uses: Vec<(String, Option<(String, String)>)> = Vec::new();
+
+    let has_ref = |examples: &IndexMap<String, RefOr<OaExample>>| {
+        examples.values().any(|e| matches!(e, RefOr::Ref(r) if r.ref_.as_str() == ref_path))
+    };
+
+    for (path_key, path_item) in &spec.paths {
+        for (method, op) in path_item.operations() {
+            if let Some(body) = op.request_body.as_ref().and_then(|rb| rb.as_item()) {
+                for (ct, media) in &body.content {
+                    if has_ref(&media.examples) {
+                        uses.push((
+                            format!("{method} {path_key}  ·  Request Body  ·  {ct}"),
+                            Some((path_key.clone(), method.to_string())),
+                        ));
+                    }
+                }
+            }
+            for (code, resp_ref) in &op.responses {
+                if let Some(resp) = resp_ref.as_item() {
+                    for (ct, media) in &resp.content {
+                        if has_ref(&media.examples) {
+                            uses.push((
+                                format!("{method} {path_key}  ·  {code}  ·  {ct}"),
+                                Some((path_key.clone(), method.to_string())),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(comps) = &spec.components {
+        for (rb_name, rb_ref) in &comps.request_bodies {
+            if let Some(body) = rb_ref.as_item() {
+                for (ct, media) in &body.content {
+                    if has_ref(&media.examples) {
+                        uses.push((format!("Component Request Body: {rb_name}  ·  {ct}"), None));
+                    }
+                }
+            }
+        }
+        for (resp_name, resp_ref) in &comps.responses {
+            if let Some(resp) = resp_ref.as_item() {
+                for (ct, media) in &resp.content {
+                    if has_ref(&media.examples) {
+                        uses.push((format!("Component Response: {resp_name}  ·  {ct}"), None));
+                    }
+                }
+            }
+        }
+    }
+
+    uses
+}
+
 fn edit_example_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
     ui.heading(format!("Example: {name}"));
     ui.add_space(4.0);
+
+    // Collect uses while spec is still fully accessible (before mutable sub-borrows).
+    let ref_path = format!("#/components/examples/{name}");
+    let uses = example_uses(spec, &ref_path);
+
     let Some(comps) = spec.components.as_mut() else { return false };
     let Some(ex) = comps.examples.get_mut(name) else { ui.label("Not found."); return false };
     match ex {
@@ -2281,14 +2572,52 @@ fn edit_example_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool
                 c
             });
             section_header(ui, "Value (JSON):");
-            let val_str = example.value.as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
-            let mut s = val_str;
-            if ui.add(egui::TextEdit::multiline(&mut s).desired_rows(8).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace)).changed() {
-                example.value = serde_json::from_str(&s).ok();
-                ch = true;
+            // Persist the raw text buffer so mid-edit invalid JSON doesn't snap back.
+            let buf_id     = egui::Id::new(format!("ex_{name}_json_buf"));
+            let tracked_id = egui::Id::new(format!("ex_{name}_json_track"));
+            let tracked: String = ui.data(|d| d.get_temp(tracked_id).unwrap_or_default());
+            if tracked != *name {
+                let initial = example.value.as_ref()
+                    .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                    .unwrap_or_default();
+                ui.data_mut(|d| {
+                    d.insert_temp(tracked_id, name.to_string());
+                    d.insert_temp(buf_id, initial);
+                });
             }
+            let mut s: String = ui.data(|d| d.get_temp(buf_id).unwrap_or_default());
+            let resp = ui.add(egui::TextEdit::multiline(&mut s).desired_rows(8).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+            ui.data_mut(|d| d.insert_temp(buf_id, s.clone()));
+            if resp.changed() {
+                if s.trim().is_empty() {
+                    example.value = None;
+                    ch = true;
+                } else if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                    example.value = Some(v);
+                    ch = true;
+                }
+            }
+
+            // ── Used in ───────────────────────────────────────────────────────
+            section_header(ui, "Used In:");
+            if uses.is_empty() {
+                ui.label(RichText::new("Not referenced anywhere.").weak().italics());
+            } else {
+                for (label, nav) in &uses {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(label).monospace().small());
+                        if let Some((path, method)) = nav {
+                            if ui.link("Edit").clicked() {
+                                ui.data_mut(|d| d.insert_temp(
+                                    egui::Id::new("oa_navigate_operation"),
+                                    (path.clone(), method.clone()),
+                                ));
+                            }
+                        }
+                    });
+                }
+            }
+
             ch
         }
     }

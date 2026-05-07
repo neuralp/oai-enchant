@@ -61,7 +61,7 @@ fn search_spec(spec: &OpenApiSpec, query: &str) -> Vec<SearchHit> {
         hit!("TAG", grey,
              tag.name.clone(),
              excerpt(tag.description.as_deref().unwrap_or(""), 50),
-             Selection::Tags);
+             Selection::Tag(tag.name.clone()));
     }
 
     // ── Servers ───────────────────────────────────────────────────────────────
@@ -404,9 +404,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
         .id_salt("sb_tags")
         .show(ui, |ui| {
             for name in &data.tag_names {
-                let sel = app.selection == Selection::Tags;
+                let sel = app.selection == Selection::Tag(name.clone());
                 if ui.selectable_label(sel, format!("  {name}")).clicked() {
-                    app.selection = Selection::Tags;
+                    app.selection = Selection::Tag(name.clone());
                 }
             }
             if ui.small_button("+ Add Tag").clicked() {
