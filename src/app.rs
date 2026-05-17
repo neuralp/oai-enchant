@@ -16,6 +16,7 @@ pub enum Selection {
     Tags,
     Tag(String),
     ExternalDocs,
+    Paths,
     Path(String),
     Operation(String, String), // path, method
     Schema(String),
@@ -25,6 +26,12 @@ pub enum Selection {
     Example(String),
     Header(String),
     SecurityScheme(String),
+    Schemas,
+    RequestBodies,
+    ComponentResponses,
+    ComponentParameters,
+    Examples,
+    SecuritySchemes,
     RawEditor,
 }
 
@@ -1047,6 +1054,12 @@ impl eframe::App for App {
                     d.remove_temp::<(String, String)>(egui::Id::new("oa_navigate_operation"))
                 }) {
                     self.selection = Selection::Operation(path, method);
+                }
+                // Navigate from any overview page (paths, tags, component lists, etc.)
+                if let Some(sel) = ui.data_mut(|d| {
+                    d.remove_temp::<Selection>(egui::Id::new("oa_navigate_to"))
+                }) {
+                    self.selection = sel;
                 }
                 // Keep selection in sync when a tag is renamed.
                 if let Some(new_name) = ui.data_mut(|d| {

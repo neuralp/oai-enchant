@@ -43,13 +43,16 @@ pub fn show(
                 });
             }
             Selection::Info => changed = edit_info(ui, spec),
-            Selection::Servers => changed = edit_servers(ui, spec),
-            Selection::Tags => changed = edit_tags(ui, spec),
+            Selection::Servers => changed = show_servers_list(ui, spec),
+            Selection::Tags => changed = show_tags_list(ui, spec),
             Selection::Tag(name) => {
                 let name = name.clone();
                 changed = edit_tag_view(ui, spec, &name);
             }
             Selection::ExternalDocs => changed = edit_external_docs(ui, spec),
+            Selection::Paths => {
+                changed = show_paths_list(ui, spec);
+            }
             Selection::Path(p) => {
                 let path = p.clone();
                 changed = edit_path(ui, spec, &path, new_item);
@@ -58,22 +61,27 @@ pub fn show(
                 let (path, method) = (p.clone(), m.clone());
                 changed = edit_operation(ui, spec, &path, &method, new_item);
             }
+            Selection::Schemas => changed = show_schemas_list(ui, spec),
             Selection::Schema(name) => {
                 let name = name.clone();
                 changed = edit_schema_by_name(ui, spec, &name);
             }
+            Selection::RequestBodies => changed = show_request_bodies_list(ui, spec),
             Selection::RequestBody(name) => {
                 let name = name.clone();
                 changed = edit_request_body_by_name(ui, spec, &name);
             }
+            Selection::ComponentResponses => changed = show_component_responses_list(ui, spec),
             Selection::ComponentResponse(name) => {
                 let name = name.clone();
                 changed = edit_component_response_by_name(ui, spec, &name);
             }
+            Selection::ComponentParameters => changed = show_component_parameters_list(ui, spec),
             Selection::ComponentParameter(name) => {
                 let name = name.clone();
                 changed = edit_component_parameter_by_name(ui, spec, &name);
             }
+            Selection::Examples => changed = show_examples_list(ui, spec),
             Selection::Example(name) => {
                 let name = name.clone();
                 changed = edit_example_by_name(ui, spec, &name);
@@ -82,6 +90,7 @@ pub fn show(
                 let name = name.clone();
                 changed = edit_header_by_name(ui, spec, &name);
             }
+            Selection::SecuritySchemes => changed = show_security_schemes_list(ui, spec),
             Selection::SecurityScheme(name) => {
                 let name = name.clone();
                 changed = edit_security_scheme_by_name(ui, spec, &name);
@@ -637,6 +646,126 @@ fn form_grid(ui: &mut Ui, id: &str, f: impl FnOnce(&mut Ui) -> bool) -> bool {
 
 // ── Editors ───────────────────────────────────────────────────────────────────
 
+// ── Shared drag-list helpers ──────────────────────────────────────────────────
+
+/// Allocate a 2×3 dot drag-grip at the current cursor and return its Response.
+fn drag_grip(ui: &mut Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(14.0, 20.0), egui::Sense::drag());
+    let color = if resp.hovered() || resp.dragged() {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    for row in 0..3usize {
+        for col in 0..2usize {
+            ui.painter().circle_filled(
+                rect.min + egui::vec2(3.0 + col as f32 * 6.0, 3.5 + row as f32 * 5.5),
+                1.5,
+                color,
+            );
+        }
+    }
+    resp
+}
+
+fn reorder_indexmap<V>(map: &mut indexmap::IndexMap<String, V>, src: usize, dst: usize) {
+    let n = map.len();
+    if src >= n || dst > n || src == dst || src + 1 == dst { return; }
+    if src < dst {
+        for i in src..(dst - 1) { map.swap_indices(i, i + 1); }
+    } else {
+        for i in (dst..src).rev() { map.swap_indices(i, i + 1); }
+    }
+}
+
+fn reorder_vec<T>(v: &mut Vec<T>, src: usize, dst: usize) {
+    let n = v.len();
+    if src >= n || dst > n || src == dst || src + 1 == dst { return; }
+    if src < dst {
+        for i in src..(dst - 1) { v.swap(i, i + 1); }
+    } else {
+        for i in (dst..src).rev() { v.swap(i, i + 1); }
+    }
+}
+
+struct DragList {
+    drag_id: egui::Id,
+    dragging: Option<usize>,
+    new_drag_src: Option<usize>,
+    drag_ended: bool,
+    current_drop_target: Option<usize>,
+    row_rects: Vec<egui::Rect>,
+}
+
+impl DragList {
+    fn new(ui: &egui::Ui, drag_id: egui::Id) -> Self {
+        let dragging = ui.data(|d| d.get_temp(drag_id));
+        Self { drag_id, dragging, new_drag_src: None, drag_ended: false, current_drop_target: None, row_rects: Vec::new() }
+    }
+
+    fn is_src(&self, i: usize) -> bool { self.dragging == Some(i) }
+
+    fn handle_grip(&mut self, ctx: &egui::Context, i: usize, grip: &egui::Response) {
+        if grip.drag_started() { self.new_drag_src = Some(i); }
+        if grip.drag_stopped() { self.drag_ended = true; }
+        if grip.dragged() || grip.drag_started() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if grip.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grab);
+        }
+    }
+
+    fn track_row(&mut self, ui: &egui::Ui, i: usize, row_rect: egui::Rect) {
+        if self.dragging.is_some() {
+            if let Some(pos) = ui.input(|inp| inp.pointer.hover_pos()) {
+                if row_rect.contains(pos) {
+                    self.current_drop_target =
+                        Some(if pos.y < row_rect.center().y { i } else { i + 1 });
+                }
+            }
+        }
+        self.row_rects.push(row_rect);
+    }
+
+    fn draw_insertion_line(&self, ui: &egui::Ui) {
+        let Some(target) = self.current_drop_target else { return };
+        if self.dragging.is_none() { return; }
+        let line_y = if target == 0 {
+            self.row_rects.first().map(|r| r.min.y - 2.0)
+        } else if target >= self.row_rects.len() {
+            self.row_rects.last().map(|r| r.max.y + 2.0)
+        } else {
+            Some((self.row_rects[target - 1].max.y + self.row_rects[target].min.y) / 2.0)
+        };
+        if let (Some(y), Some(first_r)) = (line_y, self.row_rects.first()) {
+            let x_max = self.row_rects.iter().map(|r| r.max.x).fold(0.0f32, f32::max);
+            ui.painter().hline(
+                first_r.min.x..=x_max,
+                y,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 140, 220)),
+            );
+        }
+    }
+
+    /// Call after the row loop + draw_insertion_line. Returns Some((src, dst)) if a
+    /// reorder should be applied, where dst is "insert-before" index.
+    fn finish(&mut self, ui: &egui::Ui) -> Option<(usize, usize)> {
+        if self.drag_ended {
+            let result = match (self.dragging, self.current_drop_target) {
+                (Some(src), Some(dst)) if src != dst && src + 1 != dst => Some((src, dst)),
+                _ => None,
+            };
+            ui.data_mut(|d| d.remove_temp::<usize>(self.drag_id));
+            result
+        } else {
+            if let Some(src) = self.new_drag_src {
+                ui.data_mut(|d| d.insert_temp(self.drag_id, src));
+            }
+            None
+        }
+    }
+}
+
 fn edit_info(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
     ui.heading("API Info");
     let mut ch = false;
@@ -685,74 +814,110 @@ fn edit_info(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
     ch
 }
 
-fn edit_servers(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
-    ui.heading("Servers");
-    let mut ch = false;
+fn show_servers_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    let mut changed = false;
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_servers"));
+
+    ui.heading(format!("Servers  ({})", spec.servers.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    let n = spec.servers.len();
     let mut to_remove: Option<usize> = None;
 
-    for (i, srv) in spec.servers.iter_mut().enumerate() {
-        egui::CollapsingHeader::new(
-            RichText::new(format!("Server {}: {}", i, srv.url)).monospace(),
-        )
-        .id_salt(format!("srv_{i}"))
-        .default_open(i == 0)
-        .show(ui, |ui| {
-            ch |= form_grid(ui, &format!("srv_grid_{i}"), |ui| {
-                let mut c = false;
-                c |= row_str(ui, "URL:", &mut srv.url);
-                c |= row_opt_str(ui, "Description:", &mut srv.description);
-                c
-            });
-            if ui.small_button("🗑 Remove").clicked() {
+    for i in 0..n {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+
+            let url_resp = ui.add(
+                egui::TextEdit::singleline(&mut spec.servers[i].url)
+                    .desired_width(200.0)
+                    .hint_text("https://api.example.com"),
+            );
+            if url_resp.changed() { changed = true; }
+
+            ui.add_space(4.0);
+            let mut desc = spec.servers[i].description.clone().unwrap_or_default();
+            let desc_resp = ui.add(
+                egui::TextEdit::singleline(&mut desc)
+                    .desired_width(160.0)
+                    .hint_text("Description…"),
+            );
+            if desc_resp.changed() {
+                spec.servers[i].description = if desc.is_empty() { None } else { Some(desc) };
+                changed = true;
+            }
+
+            if ui.small_button("🗑").on_hover_text("Remove").clicked() {
                 to_remove = Some(i);
             }
-        });
+        }).response;
+
+        if dl.is_src(i) {
+            ui.painter().rect_filled(
+                row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15),
+            );
+        }
+        dl.track_row(ui, i, row.rect);
     }
 
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        reorder_vec(&mut spec.servers, src, dst);
+        changed = true;
+    }
     if let Some(idx) = to_remove {
         spec.servers.remove(idx);
-        ch = true;
+        changed = true;
     }
 
+    ui.add_space(8.0);
     if ui.button("+ Add Server").clicked() {
         spec.servers.push(Server::default());
-        ch = true;
+        changed = true;
     }
-    ch
+    changed
 }
 
-fn edit_tags(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
-    ui.heading("Tags");
-    let mut ch = false;
-    let mut to_remove: Option<usize> = None;
+fn show_tags_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    let names: Vec<String> = spec.tags.iter().map(|t| t.name.clone()).collect();
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_tags"));
 
-    for (i, tag) in spec.tags.iter_mut().enumerate() {
-        egui::CollapsingHeader::new(RichText::new(&tag.name))
-            .id_salt(format!("tag_{i}"))
-            .default_open(i == 0)
-            .show(ui, |ui| {
-                ch |= form_grid(ui, &format!("tag_grid_{i}"), |ui| {
-                    let mut c = false;
-                    c |= row_str(ui, "Name:", &mut tag.name);
-                    c |= row_opt_multiline(ui, "Description:", &mut tag.description);
-                    c
-                });
-                if ui.small_button("🗑 Remove").clicked() {
-                    to_remove = Some(i);
-                }
-            });
+    ui.heading(format!("Tags  ({})", names.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder · Click a name to edit").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    for (i, name) in names.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+            if ui.link(name.as_str()).clicked() {
+                ui.data_mut(|d| d.insert_temp(
+                    egui::Id::new("oa_navigate_to"),
+                    crate::app::Selection::Tag(name.clone()),
+                ));
+            }
+        }).response;
+
+        if dl.is_src(i) {
+            ui.painter().rect_filled(
+                row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15),
+            );
+        }
+        dl.track_row(ui, i, row.rect);
     }
 
-    if let Some(idx) = to_remove {
-        spec.tags.remove(idx);
-        ch = true;
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        reorder_vec(&mut spec.tags, src, dst);
+        return true;
     }
-
-    if ui.button("+ Add Tag").clicked() {
-        spec.tags.push(Tag { name: format!("tag{}", spec.tags.len() + 1), ..Default::default() });
-        ch = true;
-    }
-    ch
+    false
 }
 
 fn edit_tag_view(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
@@ -860,6 +1025,290 @@ fn edit_external_docs(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
         c |= row_opt_multiline(ui, "Description:", &mut docs.description);
         c
     })
+}
+
+// ── Paths overview ────────────────────────────────────────────────────────────
+
+fn path_method_color(method: &str) -> egui::Color32 {
+    match method {
+        "GET"    => egui::Color32::from_rgb(97,  175, 95),
+        "POST"   => egui::Color32::from_rgb(73,  135, 230),
+        "PUT"    => egui::Color32::from_rgb(252, 161, 48),
+        "PATCH"  => egui::Color32::from_rgb(80,  200, 200),
+        "DELETE" => egui::Color32::from_rgb(220, 80,  80),
+        _        => egui::Color32::from_rgb(155, 89,  182),
+    }
+}
+
+fn show_paths_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    // Collect display data before borrowing spec mutably later.
+    let path_data: Vec<(String, Vec<&'static str>)> = spec
+        .paths
+        .iter()
+        .map(|(k, pi)| (k.clone(), pi.operations().into_iter().map(|(m, _)| m).collect()))
+        .collect();
+
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_paths"));
+
+    ui.heading(format!("Paths  ({})", path_data.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder · Click a path to edit").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    for (i, (path_key, methods)) in path_data.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+
+            for method in methods {
+                ui.label(
+                    RichText::new(*method).small().monospace().color(path_method_color(method)),
+                );
+                ui.add_space(1.0);
+            }
+            ui.add_space(6.0);
+
+            if ui.link(RichText::new(path_key.as_str()).monospace()).clicked() {
+                ui.data_mut(|d| d.insert_temp(
+                    egui::Id::new("oa_navigate_to"),
+                    crate::app::Selection::Path(path_key.clone()),
+                ));
+            }
+        }).response;
+
+        if dl.is_src(i) {
+            ui.painter().rect_filled(
+                row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15),
+            );
+        }
+        dl.track_row(ui, i, row.rect);
+    }
+
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        reorder_indexmap(&mut spec.paths, src, dst);
+        return true;
+    }
+    false
+}
+
+// ── Component overview pages ──────────────────────────────────────────────────
+
+fn show_schemas_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    let names: Vec<String> = spec.components.as_ref()
+        .map(|c| c.schemas.keys().cloned().collect()).unwrap_or_default();
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_schemas"));
+
+    ui.heading(format!("Schemas  ({})", names.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder · Click a name to edit").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    for (i, name) in names.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+            if ui.link(name.as_str()).clicked() {
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_navigate_to"),
+                    crate::app::Selection::Schema(name.clone())));
+            }
+        }).response;
+        if dl.is_src(i) {
+            ui.painter().rect_filled(row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15));
+        }
+        dl.track_row(ui, i, row.rect);
+    }
+
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        if let Some(comps) = spec.components.as_mut() {
+            reorder_indexmap(&mut comps.schemas, src, dst);
+            return true;
+        }
+    }
+    false
+}
+
+fn show_request_bodies_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    let names: Vec<String> = spec.components.as_ref()
+        .map(|c| c.request_bodies.keys().cloned().collect()).unwrap_or_default();
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_reqbodies"));
+
+    ui.heading(format!("Request Bodies  ({})", names.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder · Click a name to edit").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    for (i, name) in names.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+            if ui.link(name.as_str()).clicked() {
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_navigate_to"),
+                    crate::app::Selection::RequestBody(name.clone())));
+            }
+        }).response;
+        if dl.is_src(i) {
+            ui.painter().rect_filled(row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15));
+        }
+        dl.track_row(ui, i, row.rect);
+    }
+
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        if let Some(comps) = spec.components.as_mut() {
+            reorder_indexmap(&mut comps.request_bodies, src, dst);
+            return true;
+        }
+    }
+    false
+}
+
+fn show_component_responses_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    let names: Vec<String> = spec.components.as_ref()
+        .map(|c| c.responses.keys().cloned().collect()).unwrap_or_default();
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_comp_responses"));
+
+    ui.heading(format!("Responses  ({})", names.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder · Click a name to edit").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    for (i, name) in names.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+            if ui.link(name.as_str()).clicked() {
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_navigate_to"),
+                    crate::app::Selection::ComponentResponse(name.clone())));
+            }
+        }).response;
+        if dl.is_src(i) {
+            ui.painter().rect_filled(row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15));
+        }
+        dl.track_row(ui, i, row.rect);
+    }
+
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        if let Some(comps) = spec.components.as_mut() {
+            reorder_indexmap(&mut comps.responses, src, dst);
+            return true;
+        }
+    }
+    false
+}
+
+fn show_component_parameters_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    let names: Vec<String> = spec.components.as_ref()
+        .map(|c| c.parameters.keys().cloned().collect()).unwrap_or_default();
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_comp_params"));
+
+    ui.heading(format!("Parameters  ({})", names.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder · Click a name to edit").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    for (i, name) in names.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+            if ui.link(name.as_str()).clicked() {
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_navigate_to"),
+                    crate::app::Selection::ComponentParameter(name.clone())));
+            }
+        }).response;
+        if dl.is_src(i) {
+            ui.painter().rect_filled(row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15));
+        }
+        dl.track_row(ui, i, row.rect);
+    }
+
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        if let Some(comps) = spec.components.as_mut() {
+            reorder_indexmap(&mut comps.parameters, src, dst);
+            return true;
+        }
+    }
+    false
+}
+
+fn show_examples_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    let names: Vec<String> = spec.components.as_ref()
+        .map(|c| c.examples.keys().cloned().collect()).unwrap_or_default();
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_examples"));
+
+    ui.heading(format!("Examples  ({})", names.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder · Click a name to edit").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    for (i, name) in names.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+            if ui.link(name.as_str()).clicked() {
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_navigate_to"),
+                    crate::app::Selection::Example(name.clone())));
+            }
+        }).response;
+        if dl.is_src(i) {
+            ui.painter().rect_filled(row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15));
+        }
+        dl.track_row(ui, i, row.rect);
+    }
+
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        if let Some(comps) = spec.components.as_mut() {
+            reorder_indexmap(&mut comps.examples, src, dst);
+            return true;
+        }
+    }
+    false
+}
+
+fn show_security_schemes_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
+    let names: Vec<String> = spec.components.as_ref()
+        .map(|c| c.security_schemes.keys().cloned().collect()).unwrap_or_default();
+    let mut dl = DragList::new(ui, egui::Id::new("oa_drag_secschemes"));
+
+    ui.heading(format!("Security Schemes  ({})", names.len()));
+    ui.label(RichText::new("Drag ⠿ to reorder · Click a name to edit").weak().small());
+    ui.separator();
+    ui.add_space(4.0);
+
+    for (i, name) in names.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let grip = drag_grip(ui);
+            dl.handle_grip(ui.ctx(), i, &grip);
+            ui.add_space(4.0);
+            if ui.link(name.as_str()).clicked() {
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_navigate_to"),
+                    crate::app::Selection::SecurityScheme(name.clone())));
+            }
+        }).response;
+        if dl.is_src(i) {
+            ui.painter().rect_filled(row.rect, 2.0, ui.visuals().selection.bg_fill.linear_multiply(0.15));
+        }
+        dl.track_row(ui, i, row.rect);
+    }
+
+    dl.draw_insertion_line(ui);
+    if let Some((src, dst)) = dl.finish(ui) {
+        if let Some(comps) = spec.components.as_mut() {
+            reorder_indexmap(&mut comps.security_schemes, src, dst);
+            return true;
+        }
+    }
+    false
 }
 
 fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, _new_item: &mut NewItemBuffers) -> bool {

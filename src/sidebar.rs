@@ -380,51 +380,81 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
     }
 
     // ── Servers ───────────────────────────────────────────────────────────────
-    let server_hdr = RichText::new(format!("Servers  ({})", data.server_labels.len())).strong();
-    egui::CollapsingHeader::new(server_hdr)
-        .id_salt("sb_servers")
-        .show(ui, |ui| {
-            for label in &data.server_labels {
-                let sel = app.selection == Selection::Servers;
-                if ui.selectable_label(sel, format!("  {label}")).clicked() {
-                    app.selection = Selection::Servers;
-                }
+    let srv_hdr_color = if app.selection == Selection::Servers {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().text_color()
+    };
+    let srv_cr = egui::CollapsingHeader::new(
+        RichText::new(format!("Servers  ({})", data.server_labels.len()))
+            .strong()
+            .color(srv_hdr_color),
+    )
+    .id_salt("sb_servers")
+    .show(ui, |ui| {
+        for label in &data.server_labels {
+            let sel = app.selection == Selection::Servers;
+            if ui.selectable_label(sel, format!("  {label}")).clicked() {
+                app.selection = Selection::Servers;
             }
-            if ui.small_button("+ Add Server").clicked() {
-                if let Some(spec) = app.spec.as_mut() {
-                    spec.servers.push(crate::model::Server::default());
-                    app.dirty = true;
-                    app.selection = Selection::Servers;
-                }
+        }
+        if ui.small_button("+ Add Server").clicked() {
+            if let Some(spec) = app.spec.as_mut() {
+                spec.servers.push(crate::model::Server::default());
+                app.dirty = true;
+                app.selection = Selection::Servers;
             }
-        });
+        }
+    });
+    if srv_cr.header_response.clicked() {
+        app.selection = Selection::Servers;
+    }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new(RichText::new(format!("Tags  ({})", data.tag_names.len())).strong())
-        .id_salt("sb_tags")
-        .show(ui, |ui| {
-            for name in &data.tag_names {
-                let sel = app.selection == Selection::Tag(name.clone());
-                if ui.selectable_label(sel, format!("  {name}")).clicked() {
-                    app.selection = Selection::Tag(name.clone());
-                }
+    let tags_hdr_color = if app.selection == Selection::Tags {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().text_color()
+    };
+    let tags_cr = egui::CollapsingHeader::new(
+        RichText::new(format!("Tags  ({})", data.tag_names.len()))
+            .strong()
+            .color(tags_hdr_color),
+    )
+    .id_salt("sb_tags")
+    .show(ui, |ui| {
+        for name in &data.tag_names {
+            let sel = app.selection == Selection::Tag(name.clone());
+            if ui.selectable_label(sel, format!("  {name}")).clicked() {
+                app.selection = Selection::Tag(name.clone());
             }
-            if ui.small_button("+ Add Tag").clicked() {
-                if let Some(spec) = app.spec.as_mut() {
-                    let n = spec.tags.len() + 1;
-                    spec.tags.push(crate::model::Tag {
-                        name: format!("tag{n}"),
-                        ..Default::default()
-                    });
-                    app.dirty = true;
-                    app.selection = Selection::Tags;
-                }
+        }
+        if ui.small_button("+ Add Tag").clicked() {
+            if let Some(spec) = app.spec.as_mut() {
+                let n = spec.tags.len() + 1;
+                spec.tags.push(crate::model::Tag {
+                    name: format!("tag{n}"),
+                    ..Default::default()
+                });
+                app.dirty = true;
+                app.selection = Selection::Tags;
             }
-        });
+        }
+    });
+    if tags_cr.header_response.clicked() {
+        app.selection = Selection::Tags;
+    }
 
     // ── Paths ─────────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new(
-        RichText::new(format!("Paths  ({})", data.paths.len())).strong(),
+    let paths_hdr_color = if app.selection == Selection::Paths {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().text_color()
+    };
+    let paths_cr = egui::CollapsingHeader::new(
+        RichText::new(format!("Paths  ({})", data.paths.len()))
+            .strong()
+            .color(paths_hdr_color),
     )
     .id_salt("sb_paths")
     .default_open(true)
@@ -516,6 +546,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
             }
         });
     });
+    if paths_cr.header_response.clicked() {
+        app.selection = Selection::Paths;
+    }
 
     // ── Components ────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new(RichText::new("Components").strong())
@@ -531,6 +564,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.duplicate_schema(&n),
                 |app, n| app.delete_schema(&n),
                 &[("Add default paths", |app, n| app.add_default_paths_for_schema(n))],
+                Some(Selection::Schemas),
             );
 
             // Request Bodies
@@ -542,6 +576,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.duplicate_request_body(&n),
                 |app, n| app.delete_request_body(&n),
                 &[],
+                Some(Selection::RequestBodies),
             );
 
             // Responses
@@ -553,6 +588,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.duplicate_component_response(&n),
                 |app, n| app.delete_component_response(&n),
                 &[],
+                Some(Selection::ComponentResponses),
             );
 
             // Parameters
@@ -564,6 +600,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.duplicate_component_parameter(&n),
                 |app, n| app.delete_component_parameter(&n),
                 &[],
+                Some(Selection::ComponentParameters),
             );
 
             // Examples
@@ -575,9 +612,10 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.duplicate_example(&n),
                 |app, n| app.delete_example(&n),
                 &[],
+                Some(Selection::Examples),
             );
 
-            // Headers (display only)
+            // Headers (display only — no individual editor, no reorder page)
             if !data.hdr_names.is_empty() {
                 egui::CollapsingHeader::new(format!("  Headers  ({})", data.hdr_names.len()))
                     .id_salt("sb_headers")
@@ -591,18 +629,29 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                     });
             }
 
-            // Security Schemes (display only)
+            // Security Schemes
             if !data.ss_names.is_empty() {
-                egui::CollapsingHeader::new(format!("  Security Schemes  ({})", data.ss_names.len()))
-                    .id_salt("sb_secschemes")
-                    .show(ui, |ui| {
-                        for name in &data.ss_names {
-                            let sel = app.selection == Selection::SecurityScheme(name.clone());
-                            if ui.selectable_label(sel, format!("    {name}")).clicked() {
-                                app.selection = Selection::SecurityScheme(name.clone());
-                            }
+                let ss_hdr_color = if app.selection == Selection::SecuritySchemes {
+                    ui.visuals().selection.stroke.color
+                } else {
+                    ui.visuals().text_color()
+                };
+                let ss_cr = egui::CollapsingHeader::new(
+                    RichText::new(format!("  Security Schemes  ({})", data.ss_names.len()))
+                        .color(ss_hdr_color),
+                )
+                .id_salt("sb_secschemes")
+                .show(ui, |ui| {
+                    for name in &data.ss_names {
+                        let sel = app.selection == Selection::SecurityScheme(name.clone());
+                        if ui.selectable_label(sel, format!("    {name}")).clicked() {
+                            app.selection = Selection::SecurityScheme(name.clone());
                         }
-                    });
+                    }
+                });
+                if ss_cr.header_response.clicked() {
+                    app.selection = Selection::SecuritySchemes;
+                }
             }
         });
 
@@ -680,15 +729,24 @@ fn section_with_add(
     duplicate_fn: fn(&mut App, String),
     delete_fn: fn(&mut App, String),
     extra_actions: &[(&'static str, fn(&mut App, String))],
+    header_sel: Option<Selection>,
 ) {
     let mut dup_name: Option<String> = None;
     let mut del_name: Option<String> = None;
     // (action_index, item_name) — deferred so we apply it after the borrow ends.
     let mut extra_action: Option<(usize, String)> = None;
 
-    egui::CollapsingHeader::new(format!("  {label}"))
-        .id_salt(id_salt)
-        .show(ui, |ui| {
+    let is_hdr_active = header_sel.as_ref().map(|s| &app.selection == s).unwrap_or(false);
+    let hdr_color = if is_hdr_active {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().text_color()
+    };
+    let cr = egui::CollapsingHeader::new(
+        RichText::new(format!("  {label}")).color(hdr_color),
+    )
+    .id_salt(id_salt)
+    .show(ui, |ui| {
             for name in names {
                 let sel = app.selection == make_sel(name.clone());
                 let resp = ui.selectable_label(sel, format!("    {name}"));
@@ -739,6 +797,12 @@ fn section_with_add(
                 }
             });
         });
+
+    if cr.header_response.clicked() {
+        if let Some(sel) = header_sel {
+            app.selection = sel;
+        }
+    }
 
     if let Some(n) = dup_name { duplicate_fn(app, n); }
     if let Some(n) = del_name { delete_fn(app, n); }
