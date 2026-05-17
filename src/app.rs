@@ -65,6 +65,108 @@ pub struct App {
     pub search_query: String,
 }
 
+/// Convert whole-number floats (e.g. `1000.0`) to integers (`1000`) throughout a
+/// Value tree.  OpenAPI fields like `minimum`, `maximum`, `minLength`, etc. are
+/// typed as `f64` in the Rust model, so serde serialises them as floats even
+/// when the value is integral.  This normalisation step keeps the YAML output
+/// consistent with what most editors write.
+fn normalize_numbers(value: &mut serde_yaml::Value) {
+    match value {
+        serde_yaml::Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                if f.fract() == 0.0
+                    && f.is_finite()
+                    && f >= i64::MIN as f64
+                    && f <= i64::MAX as f64
+                {
+                    *value = serde_yaml::Value::Number((f as i64).into());
+                }
+            }
+        }
+        serde_yaml::Value::Mapping(m) => {
+            for (_, v) in m.iter_mut() {
+                normalize_numbers(v);
+            }
+        }
+        serde_yaml::Value::Sequence(s) => {
+            for v in s.iter_mut() {
+                normalize_numbers(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Post-process serde_yaml's compact block-sequence output to use 2-space
+/// indented sequences.
+///
+/// serde_yaml always places the `-` at the same column as the parent mapping
+/// key (compact style).  This function shifts each block sequence 2 spaces to
+/// the right of its key, matching the style used by Stoplight Studio and most
+/// other editors.  The transform is idempotent.
+fn indent_block_sequences(yaml: &str) -> String {
+    let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
+    let n = lines.len();
+    let mut i = 0;
+
+    while i < n {
+        let trimmed = lines[i].trim_start_matches(' ');
+        // Skip blank lines, comments, and lines that are already sequence items.
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("- ") || trimmed == "-" {
+            i += 1;
+            continue;
+        }
+        let indent = lines[i].len() - trimmed.len();
+
+        // Find the next non-blank, non-comment line.
+        let mut j = i + 1;
+        while j < n && {
+            let t = lines[j].trim_start_matches(' ');
+            t.is_empty() || t.starts_with('#')
+        } {
+            j += 1;
+        }
+
+        if j < n {
+            let jt = lines[j].trim_start_matches(' ');
+            let j_indent = lines[j].len() - jt.len();
+
+            // Compact sequence: the `-` is at the SAME indent as the preceding line.
+            if (jt.starts_with("- ") || jt == "-") && j_indent == indent {
+                // Shift the whole block (sequence items and their content) by 2.
+                // The block ends when we reach a line whose indent is:
+                //   - strictly less than `indent` (dedented past the parent), or
+                //   - equal to `indent` but not a sequence item (sibling key).
+                let mut k = j;
+                while k < n {
+                    let kt = lines[k].trim_start_matches(' ');
+                    if kt.is_empty() {
+                        k += 1;
+                        continue;
+                    }
+                    let k_indent = lines[k].len() - kt.len();
+                    if k_indent < indent {
+                        break;
+                    }
+                    if k_indent == indent && !(kt.starts_with("- ") || kt == "-") {
+                        break;
+                    }
+                    lines[k] = format!("  {}", &lines[k]);
+                    k += 1;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    let mut result = lines.join("\n");
+    if yaml.ends_with('\n') && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
 /// Merge `updated` into `original`, preserving the original mapping key order.
 ///
 /// The merge is purely additive from `original`'s perspective:
@@ -150,7 +252,10 @@ impl App {
         if let Some(spec) = &self.spec {
             self.raw_editor_buf = match self.format {
                 FileFormat::Json => serde_json::to_string_pretty(spec).unwrap_or_default(),
-                FileFormat::Yaml => serde_yaml::to_string(spec).unwrap_or_default(),
+                FileFormat::Yaml => {
+                    let s = serde_yaml::to_string(spec).unwrap_or_default();
+                    indent_block_sequences(&s)
+                }
             };
             self.raw_editor_err = String::new();
         }
@@ -273,13 +378,17 @@ impl App {
 
     fn write_spec(&mut self, spec: OpenApiSpec, path: &PathBuf, fmt: FileFormat) {
         // Serialize the typed struct to a value tree.
-        let updated = match serde_yaml::to_value(&spec) {
+        let mut updated = match serde_yaml::to_value(&spec) {
             Ok(v) => v,
             Err(e) => {
                 self.status = format!("Serialization error: {e}");
                 return;
             }
         };
+
+        // Normalise whole-number floats → integers before merging so that
+        // `minimum: 1000` in the original file doesn't become `minimum: 1000.0`.
+        normalize_numbers(&mut updated);
 
         // Merge updated values into the raw tree, preserving original key order
         // and any extension fields. For new specs (no raw), use updated directly.
@@ -291,6 +400,7 @@ impl App {
 
         let result = match fmt {
             FileFormat::Yaml => serde_yaml::to_string(self.raw.as_ref().unwrap())
+                .map(|s| indent_block_sequences(&s))
                 .map_err(|e| e.to_string()),
             FileFormat::Json => serde_json::to_string_pretty(self.raw.as_ref().unwrap())
                 .map_err(|e| e.to_string()),
