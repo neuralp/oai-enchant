@@ -1311,7 +1311,7 @@ fn show_security_schemes_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
     false
 }
 
-fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, _new_item: &mut NewItemBuffers) -> bool {
+fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, new_item: &mut NewItemBuffers) -> bool {
     // ── Editable path ─────────────────────────────────────────────────────────
     // Use a tracking key so the buffer resets whenever the user navigates to a
     // different path (avoids stale text from the previous selection).
@@ -1357,8 +1357,8 @@ fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, _new_item: &mut Ne
             .map(|(k, v)| if k == path { (new_key.clone(), v) } else { (k, v) })
             .collect();
         spec.paths = reordered.into_iter().collect();
-        // Signal app.rs to update the Selection so the sidebar stays in sync
-        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_path_rename"), new_key));
+        // Signal app.rs to update the Selection and rename the raw YAML key
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_path_rename"), (path.to_string(), new_key)));
         return true; // next frame re-enters with the new path
     }
 
@@ -1375,6 +1375,73 @@ fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, _new_item: &mut Ne
         c |= row_opt_str(ui, "Summary:", &mut item.summary);
         c |= row_opt_multiline(ui, "Description:", &mut item.description);
         c
+    });
+
+    // Parameters
+    section_header(ui, "Parameters");
+    let mut to_remove_param: Option<usize> = None;
+    for (i, p) in item.parameters.iter_mut().enumerate() {
+        match p {
+            RefOr::Ref(r) => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("$ref: {}", r.ref_)).weak());
+                    if ui.small_button("🗑").clicked() {
+                        to_remove_param = Some(i);
+                    }
+                });
+            }
+            RefOr::Item(param) => {
+                egui::CollapsingHeader::new(format!("  {} ({})", param.name, param.in_))
+                    .id_salt(format!("path_param_{i}"))
+                    .show(ui, |ui| {
+                        ch |= edit_parameter_inline(ui, param, i + 10000); // offset avoids id collision with op params
+                        if ui.small_button("🗑 Remove").clicked() {
+                            to_remove_param = Some(i);
+                        }
+                    });
+            }
+        }
+    }
+    if let Some(idx) = to_remove_param {
+        item.parameters.remove(idx);
+        ch = true;
+    }
+
+    ui.horizontal(|ui| {
+        if ui.small_button("+ Add Parameter").clicked() {
+            item.parameters.push(RefOr::Item(Parameter {
+                in_: "path".to_string(),
+                ..Default::default()
+            }));
+            ch = true;
+        }
+        ui.add(
+            egui::TextEdit::singleline(&mut new_item.parameter_name)
+                .hint_text("$ref path…")
+                .desired_width(160.0),
+        );
+        let param_refs: Vec<String> = ui.data(|d| d.get_temp(egui::Id::new("oa_param_refs")).unwrap_or_default());
+        if !param_refs.is_empty() {
+            let cur = new_item.parameter_name.clone();
+            let sel_name = param_refs.iter().find(|p| **p == cur)
+                .and_then(|p| p.split('/').last()).unwrap_or("pick…");
+            egui::ComboBox::from_id_salt("path_param_ref_pick")
+                .selected_text(sel_name)
+                .show_ui(ui, |ui| {
+                    for ref_path in &param_refs {
+                        let name = ref_path.split('/').last().unwrap_or(ref_path.as_str());
+                        if ui.selectable_label(cur == *ref_path, name).clicked() {
+                            new_item.parameter_name = ref_path.clone();
+                        }
+                    }
+                });
+        }
+        if ui.small_button("+ Add $ref").clicked() && !new_item.parameter_name.is_empty() {
+            let r = new_item.parameter_name.clone();
+            new_item.parameter_name.clear();
+            item.parameters.push(RefOr::Ref(Ref { ref_: r, ..Default::default() }));
+            ch = true;
+        }
     });
 
     section_header(ui, "Operations");

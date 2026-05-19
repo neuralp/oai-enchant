@@ -1,139 +1,105 @@
-use egui::{Color32, Vec2};
-
-// 8-bit palette
-const BG:      Color32 = Color32::from_rgb(8,   8,  20);
-const WAND:    Color32 = Color32::from_rgb(160, 100, 40);
-const WAND_HI: Color32 = Color32::from_rgb(210, 155, 70);
-const STAR:    Color32 = Color32::from_rgb(255, 210,  0);
-const STAR_HI: Color32 = Color32::from_rgb(255, 255, 160);
-const SPARK:   Color32 = Color32::from_rgb(255, 230, 60);
+use egui::Vec2;
 
 // ── Welcome-screen logo ───────────────────────────────────────────────────────
 
-/// Draws the wand pixel-art logo into a 300×170 area inside `ui`.
+/// Renders the pixel-art SVG logo into a 300×170 area inside `ui`.
 pub fn draw_logo(ui: &mut egui::Ui) {
-    const PS: f32 = 5.0; // one "pixel" = 5×5 screen points
-    let desired = Vec2::new(300.0, 170.0);
-    let (resp, painter) = ui.allocate_painter(desired, egui::Sense::hover());
-    let r  = resp.rect;
-    let ox = r.min.x;
-    let oy = r.min.y;
-
-    painter.rect_filled(r, 0.0, BG);
-
-    // Draw one grid "pixel" at (gx, gy)
-    let pix = |gx: i32, gy: i32, color: Color32| {
-        let min = egui::Pos2::new(ox + gx as f32 * PS, oy + gy as f32 * PS);
-        painter.rect_filled(egui::Rect::from_min_size(min, Vec2::splat(PS)), 0.0, color);
-    };
-
-    // Wand shaft via Bresenham: base (8, 30) → tip (18, 8), 2px wide
-    {
-        let (mut x, mut y) = (8i32, 30i32);
-        let (ex, ey) = (18i32, 8i32);
-        let adx = (ex - x).abs();
-        let ady = (ey - y).abs();
-        let sx  = if ex > x { 1i32 } else { -1 };
-        let sy  = if ey > y { 1i32 } else { -1 };
-        let mut err = adx - ady;
-        loop {
-            pix(x,     y, WAND);
-            pix(x + 1, y, WAND_HI);
-            if x == ex && y == ey { break; }
-            let e2 = 2 * err;
-            if e2 > -ady { err -= ady; x += sx; }
-            if e2 <  adx { err += adx; y += sy; }
-        }
-    }
-
-    // 5×5 pixel-cross star, centre (19, 7)
-    for &(gx, gy, c) in &[
-        (19i32, 5i32, STAR_HI),
-        (18, 6, STAR),  (19, 6, STAR_HI), (20, 6, STAR),
-        (17, 7, STAR),  (18, 7, STAR),    (19, 7, STAR_HI), (20, 7, STAR), (21, 7, STAR),
-        (18, 8, STAR),  (19, 8, STAR_HI), (20, 8, STAR),
-        (19, 9, STAR),
-    ] {
-        pix(gx, gy, c);
-    }
-
-    // Scattered sparkle pixels — magic particles radiating from the wand tip
-    for &(gx, gy) in &[
-        // Near the star
-        (22, 5), (23, 3), (24, 9), (21, 11),
-        // Mid-canvas spread
-        (27, 4), (29, 8), (31, 3), (33, 6), (35, 10), (36, 4),
-        (39, 7), (41, 4), (43, 9), (45, 5), (47, 3), (48, 8),
-        // Far right
-        (51, 5), (53, 7), (55, 4), (57, 9), (58, 6),
-        // Lower-half background stars
-        (26, 16), (32, 14), (38, 17), (44, 13), (50, 15), (56, 18),
-        // Above the wand shaft
-        (11, 2), (13, 4), (7,  6),
-        // Deep field
-        (30, 21), (42, 23), (54, 20),
-    ] {
-        pix(gx, gy, SPARK);
-    }
+    let bytes: &[u8] = include_bytes!("../assets/logo.svg");
+    let img = egui::Image::from_bytes("bytes://oai-enchant-logo.svg", bytes)
+        .fit_to_exact_size(Vec2::new(300.0, 170.0));
+    ui.add(img);
 }
 
-// ── Window icon ───────────────────────────────────────────────────────────────
+// ── Window / taskbar icon ─────────────────────────────────────────────────────
 
-/// Generates a 128×128 RGBA pixel-art icon.
+/// Generates a 128×128 RGBA pixel-art icon matching the logo design.
+/// Grid: 32×32 pixels at PS=4. Left half = wand; right half = API document.
 pub fn make_icon() -> egui::IconData {
     const SIZE: usize = 128;
-    const PS:   f32   = 5.0;
+    const PS:   f32   = 4.0;
     let mut buf = vec![0u8; SIZE * SIZE * 4];
 
+    // Background
     fill_rect_f(&mut buf, SIZE, 0.0, 0.0, SIZE as f32, SIZE as f32, 8, 8, 20, 255);
 
-    // Wand shaft via Bresenham: base (2, 21) → tip (12, 4), 2px wide
-    {
-        let (mut x, mut y) = (2i32, 21i32);
-        let (ex, ey) = (12i32, 4i32);
-        let adx = (ex - x).abs();
-        let ady = (ey - y).abs();
-        let sx  = if ex > x { 1i32 } else { -1 };
-        let sy  = if ey > y { 1i32 } else { -1 };
-        let mut err = adx - ady;
-        loop {
-            icon_pix(&mut buf, SIZE, x,     y, PS, 160, 100, 40);
-            icon_pix(&mut buf, SIZE, x + 1, y, PS, 210, 155, 70);
-            if x == ex && y == ey { break; }
-            let e2 = 2 * err;
-            if e2 > -ady { err -= ady; x += sx; }
-            if e2 <  adx { err += adx; y += sy; }
-        }
-    }
-
-    // 5×5 pixel-cross star, centre (13, 4)
+    // ── Wand star (centre gx=7, gy=4) ────────────────────────────────────────
     for &(gx, gy, r, g, b) in &[
-        (13i32, 2i32, 255u8, 255u8, 160u8),
-        (12, 3, 255, 210, 0), (13, 3, 255, 255, 160), (14, 3, 255, 210, 0),
-        (11, 4, 255, 210, 0), (12, 4, 255, 210, 0), (13, 4, 255, 255, 160), (14, 4, 255, 210, 0), (15, 4, 255, 210, 0),
-        (12, 5, 255, 210, 0), (13, 5, 255, 255, 160), (14, 5, 255, 210, 0),
-        (13, 6, 255, 210, 0),
+        (7i32, 2i32, 255u8, 255u8, 160u8),                                              // top spike
+        (6, 3, 255, 210, 0), (7, 3, 255, 255, 160), (8, 3, 255, 210, 0),               // row 3
+        (5, 4, 255, 210, 0), (6, 4, 255, 210, 0), (7, 4, 255, 255, 160),               // row 4
+        (8, 4, 255, 210, 0), (9, 4, 255, 210, 0),
+        (6, 5, 255, 210, 0), (7, 5, 255, 255, 160), (8, 5, 255, 210, 0),               // row 5
+        (7, 6, 255, 255, 160),                                                           // bottom spike
     ] {
         icon_pix(&mut buf, SIZE, gx, gy, PS, r, g, b);
     }
 
-    // Scatter sparkles
-    for &(gx, gy) in &[
-        (16, 2), (17, 5), (18, 2), (20, 4), (22, 6),
-        (10, 2), (9,  5), (8,  8),
-        (19, 8), (21, 10), (23, 7), (24, 9),
-        (14, 9), (15, 12), (19, 13),
+    // ── Wand shaft: 2-pixel-wide staircase from (gx=7,gy=7) to (gx=2,gy=17) ─
+    // Each row: (gy, gx_dark, gx_light)
+    for &(gy, gx_d, gx_l) in &[
+        (7i32, 6i32, 7i32), (8,  6, 7),
+        (9,  5, 6),         (10, 5, 6),
+        (11, 4, 5),         (12, 4, 5),
+        (13, 3, 4),         (14, 3, 4),
+        (15, 2, 3),         (16, 2, 3),
+        (17, 2, 3),
     ] {
-        icon_pix(&mut buf, SIZE, gx, gy, PS, 255, 230, 60);
+        icon_pix(&mut buf, SIZE, gx_d, gy, PS, 160, 100, 40);
+        icon_pix(&mut buf, SIZE, gx_l, gy, PS, 210, 155, 70);
     }
+
+    // ── Sparkles ──────────────────────────────────────────────────────────────
+    for &(gx, gy) in &[
+        (10i32, 2i32), (12, 3), (11, 5), (13, 4),
+        (9, 7), (11, 8), (12, 10), (10, 12), (12, 14),
+        (0, 6), (0, 9), (1, 12), (0, 15), (1, 18), (0, 21),
+        (4, 20), (3, 23), (5, 25), (2, 27),
+        (13, 17), (12, 20), (13, 23), (12, 27),
+    ] {
+        icon_pix(&mut buf, SIZE, gx, gy, PS, 255, 224, 48);
+    }
+
+    // ── API document page body: cols 14-29, rows 2-28 ────────────────────────
+    fill_rect_f(&mut buf, SIZE, 56.0, 8.0, 120.0, 116.0, 184, 196, 216, 255);
+
+    // Corner fold: 3-step staircase cut at top-right
+    fill_rect_f(&mut buf, SIZE, 108.0,  8.0, 120.0, 12.0, 8, 8, 20, 255); // row 2: cut cols 27-29
+    fill_rect_f(&mut buf, SIZE, 112.0, 12.0, 120.0, 16.0, 8, 8, 20, 255); // row 3: cut cols 28-29
+    fill_rect_f(&mut buf, SIZE, 116.0, 16.0, 120.0, 20.0, 8, 8, 20, 255); // row 4: cut col 29
+
+    // Fold-face pixels (one per staircase step)
+    icon_pix(&mut buf, SIZE, 26, 2, PS, 120, 136, 160);
+    icon_pix(&mut buf, SIZE, 27, 3, PS, 120, 136, 160);
+    icon_pix(&mut buf, SIZE, 28, 4, PS, 120, 136, 160);
+
+    // Header bar: rows 3-4, cols 15-25
+    fill_rect_f(&mut buf, SIZE, 60.0, 12.0, 104.0, 20.0, 136, 152, 176, 255);
+
+    // Separator rule: row 6, cols 15-28
+    fill_rect_f(&mut buf, SIZE, 60.0, 24.0, 116.0, 28.0, 154, 170, 187, 255);
+
+    // GET row (rows 8-9, y=32..40)
+    fill_rect_f(&mut buf, SIZE,  60.0, 32.0,  72.0, 40.0,  58, 128,  64, 255);
+    fill_rect_f(&mut buf, SIZE,  76.0, 32.0, 112.0, 40.0,  96, 104, 120, 255);
+
+    // POST row (rows 12-13, y=48..56)
+    fill_rect_f(&mut buf, SIZE,  60.0, 48.0,  72.0, 56.0,  42,  80, 168, 255);
+    fill_rect_f(&mut buf, SIZE,  76.0, 48.0, 112.0, 56.0,  96, 104, 120, 255);
+
+    // DELETE row (rows 16-17, y=64..72)
+    fill_rect_f(&mut buf, SIZE,  60.0, 64.0,  72.0, 72.0, 168,  48,  48, 255);
+    fill_rect_f(&mut buf, SIZE,  76.0, 64.0, 112.0, 72.0,  96, 104, 120, 255);
+
+    // PATCH row (rows 20-21, y=80..88)
+    fill_rect_f(&mut buf, SIZE,  60.0, 80.0,  72.0, 88.0, 168,  96,  32, 255);
+    fill_rect_f(&mut buf, SIZE,  76.0, 80.0, 112.0, 88.0,  96, 104, 120, 255);
 
     egui::IconData { rgba: buf, width: SIZE as u32, height: SIZE as u32 }
 }
 
 // ── Pixel-buffer helpers ──────────────────────────────────────────────────────
 
-fn icon_pix(buf: &mut [u8], size: usize, gx: i32, gy: i32, ps: f32,
-            r: u8, g: u8, b: u8) {
+fn icon_pix(buf: &mut [u8], size: usize, gx: i32, gy: i32, ps: f32, r: u8, g: u8, b: u8) {
     if gx < 0 || gy < 0 { return; }
     let x0 = gx as f32 * ps;
     let y0 = gy as f32 * ps;

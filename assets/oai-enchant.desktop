@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OAI Enchant
+GenericName=OpenAPI Editor
+Comment=Visual editor for OpenAPI specifications (up to v3.2)
+Exec=oai-enchant
+Icon=oai-enchant
+Categories=Development;WebDevelopment;
+Keywords=openapi;swagger;api;rest;yaml;json;editor;
+StartupNotify=true
+StartupWMClass=oai-enchant

@@ -229,8 +229,63 @@ fn merge_yaml(original: &mut serde_yaml::Value, updated: &serde_yaml::Value) {
     *orig_map = result;
 }
 
+/// Reorder the keys of a raw YAML Mapping to match the key order in `updated`,
+/// without touching values. Used to sync drag-to-reorder changes into `self.raw`
+/// before `merge_yaml` runs, since `merge_yaml` preserves original key order.
+/// Keys only in the raw mapping (e.g. `x-*` extensions) are appended at the end.
+fn sync_key_order(raw: &mut serde_yaml::Value, updated: &serde_yaml::Value) {
+    let (raw_map, upd_map) = match (raw, updated) {
+        (serde_yaml::Value::Mapping(r), serde_yaml::Value::Mapping(u)) => (r, u),
+        _ => return,
+    };
+
+    let snapshot: Vec<(serde_yaml::Value, serde_yaml::Value)> =
+        raw_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    let upd_str_keys: std::collections::HashSet<&str> = upd_map
+        .iter()
+        .filter_map(|(k, _)| if let serde_yaml::Value::String(s) = k { Some(s.as_str()) } else { None })
+        .collect();
+
+    let mut result = serde_yaml::Mapping::new();
+    for (k, _) in upd_map.iter() {
+        if let Some((_, v)) = snapshot.iter().find(|(rk, _)| rk == k) {
+            result.insert(k.clone(), v.clone());
+        }
+    }
+    for (k, v) in &snapshot {
+        if let serde_yaml::Value::String(s) = k {
+            if !upd_str_keys.contains(s.as_str()) {
+                result.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    *raw_map = result;
+}
+
+/// Navigate a raw YAML value along `path` (a sequence of string keys) and
+/// sync the key order of the reached mapping to match that of `updated`.
+fn sync_section_key_order(raw: &mut serde_yaml::Value, updated: &serde_yaml::Value, path: &[&str]) {
+    let mut r = raw;
+    let mut u = updated;
+    for &key in path {
+        let k = serde_yaml::Value::String(key.to_string());
+        r = match r {
+            serde_yaml::Value::Mapping(m) => match m.get_mut(&k) { Some(v) => v, None => return },
+            _ => return,
+        };
+        u = match u {
+            serde_yaml::Value::Mapping(m) => match m.get(&k) { Some(v) => v, None => return },
+            _ => return,
+        };
+    }
+    sync_key_order(r, u);
+}
+
 impl App {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         Self {
             spec: None,
             current_file: None,
@@ -393,6 +448,17 @@ impl App {
         // Merge updated values into the raw tree, preserving original key order
         // and any extension fields. For new specs (no raw), use updated directly.
         if let Some(raw) = &mut self.raw {
+            // Sync key order for user-reorderable sections before merging, so that
+            // drag-to-reorder changes in the typed spec are reflected in the saved
+            // file. merge_yaml preserves raw's key order, so we must update raw's
+            // order here first. Only top-level mapping keys are synced; nested field
+            // order within individual items is preserved from the original file.
+            for section in &["paths"] {
+                sync_section_key_order(raw, &updated, &[section]);
+            }
+            for section in &["schemas", "requestBodies", "responses", "parameters", "examples"] {
+                sync_section_key_order(raw, &updated, &["components", section]);
+            }
             merge_yaml(raw, &updated);
         } else {
             self.raw = Some(updated);
@@ -1152,10 +1218,22 @@ impl eframe::App for App {
                     crate::editors::show(ui, spec, &self.selection, &mut self.new_item);
                 if changed {
                     self.dirty = true;
-                    // If a path was renamed, update the selection to the new key.
-                    if let Some(new_path) = ui.data_mut(|d| {
-                        d.remove_temp::<String>(egui::Id::new("oa_path_rename"))
+                    // If a path was renamed, rename the key in raw YAML and update selection.
+                    if let Some((old_path, new_path)) = ui.data_mut(|d| {
+                        d.remove_temp::<(String, String)>(egui::Id::new("oa_path_rename"))
                     }) {
+                        if let Some(raw) = &mut self.raw {
+                            let paths_key = serde_yaml::Value::String("paths".to_string());
+                            if let Some(serde_yaml::Value::Mapping(paths_map)) =
+                                raw.as_mapping_mut().and_then(|m| m.get_mut(&paths_key))
+                            {
+                                let old_k = serde_yaml::Value::String(old_path);
+                                let new_k = serde_yaml::Value::String(new_path.clone());
+                                if let Some(v) = paths_map.remove(&old_k) {
+                                    paths_map.insert(new_k, v);
+                                }
+                            }
+                        }
                         self.selection = Selection::Path(new_path);
                     }
                 }

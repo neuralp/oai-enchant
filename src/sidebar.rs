@@ -2,6 +2,7 @@ use crate::app::{App, Selection};
 use crate::lint::{self, Level};
 use crate::model::OpenApiSpec;
 use egui::RichText;
+use std::collections::HashMap;
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
@@ -198,6 +199,73 @@ fn method_color(method: &str) -> egui::Color32 {
     METHOD_COLORS.iter().find(|(m, _)| *m == method).map(|(_, c)| *c).unwrap_or(egui::Color32::GRAY)
 }
 
+fn level_color(level: Level) -> Option<egui::Color32> {
+    match level {
+        Level::Error   => Some(egui::Color32::from_rgb(220, 80, 80)),
+        Level::Warning => Some(egui::Color32::from_rgb(220, 160, 60)),
+        Level::Info    => None,
+    }
+}
+
+/// Pre-computed worst diagnostic level per item, used to color sidebar entries.
+struct DiagLevels {
+    paths:          HashMap<String, Level>,
+    operations:     HashMap<(String, String), Level>,
+    schemas:        HashMap<String, Level>,
+    request_bodies: HashMap<String, Level>,
+    responses:      HashMap<String, Level>,
+    parameters:     HashMap<String, Level>,
+    examples:       HashMap<String, Level>,
+    tags:           HashMap<String, Level>,
+}
+
+impl DiagLevels {
+    fn from_diagnostics(diags: &[lint::Diagnostic]) -> Self {
+        let mut paths:          HashMap<String, Level> = HashMap::new();
+        let mut operations:     HashMap<(String, String), Level> = HashMap::new();
+        let mut schemas:        HashMap<String, Level> = HashMap::new();
+        let mut request_bodies: HashMap<String, Level> = HashMap::new();
+        let mut responses:      HashMap<String, Level> = HashMap::new();
+        let mut parameters:     HashMap<String, Level> = HashMap::new();
+        let mut examples:       HashMap<String, Level> = HashMap::new();
+        let mut tags:           HashMap<String, Level> = HashMap::new();
+
+        for diag in diags {
+            let lv = diag.level;
+            let Some(sel) = &diag.goto else { continue };
+            match sel {
+                Selection::Tag(n) => Self::put(&mut tags, n.clone(), lv),
+                Selection::Path(p) => Self::put(&mut paths, p.clone(), lv),
+                Selection::Operation(p, m) => {
+                    Self::put(&mut operations, (p.clone(), m.clone()), lv);
+                    Self::put(&mut paths, p.clone(), lv);
+                }
+                Selection::Schema(n)              => Self::put(&mut schemas,        n.clone(), lv),
+                Selection::RequestBody(n)         => Self::put(&mut request_bodies, n.clone(), lv),
+                Selection::ComponentResponse(n)   => Self::put(&mut responses,      n.clone(), lv),
+                Selection::ComponentParameter(n)  => Self::put(&mut parameters,     n.clone(), lv),
+                Selection::Example(n)             => Self::put(&mut examples,       n.clone(), lv),
+                _ => {}
+            }
+        }
+
+        DiagLevels { paths, operations, schemas, request_bodies, responses, parameters, examples, tags }
+    }
+
+    fn put<K: Eq + std::hash::Hash>(map: &mut HashMap<K, Level>, key: K, lv: Level) {
+        let e = map.entry(key).or_insert(lv);
+        if lv < *e { *e = lv; }
+    }
+
+    fn item_color(&self, map: &HashMap<String, Level>, name: &str) -> Option<egui::Color32> {
+        map.get(name).and_then(|&lv| level_color(lv))
+    }
+
+    fn op_color(&self, path: &str, method: &str) -> Option<egui::Color32> {
+        self.operations.get(&(path.to_string(), method.to_string())).and_then(|&lv| level_color(lv))
+    }
+}
+
 // All display data collected from the spec in one pass (owns strings so borrows are released).
 struct SidebarData {
     server_labels: Vec<String>,
@@ -212,6 +280,7 @@ struct SidebarData {
     hdr_names: Vec<String>,
     ss_names: Vec<String>,
     diagnostics: Vec<lint::Diagnostic>,
+    diag_levels: DiagLevels,
 }
 
 impl SidebarData {
@@ -247,8 +316,9 @@ impl SidebarData {
         let ss_names      = comps.map(|c| c.security_schemes.keys().cloned().collect()).unwrap_or_default();
 
         let diagnostics = lint::lint(spec);
+        let diag_levels = DiagLevels::from_diagnostics(&diagnostics);
 
-        SidebarData { server_labels, tag_names, paths, schema_names, rb_names, resp_names, param_names, ex_names, hdr_names, ss_names, diagnostics }
+        SidebarData { server_labels, tag_names, paths, schema_names, rb_names, resp_names, param_names, ex_names, hdr_names, ss_names, diagnostics, diag_levels }
     }
 }
 
@@ -425,7 +495,11 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
     .show(ui, |ui| {
         for name in &data.tag_names {
             let sel = app.selection == Selection::Tag(name.clone());
-            if ui.selectable_label(sel, format!("  {name}")).clicked() {
+            let text = match data.diag_levels.item_color(&data.diag_levels.tags, name) {
+                Some(c) => RichText::new(format!("  {name}")).color(c),
+                None    => RichText::new(format!("  {name}")),
+            };
+            if ui.selectable_label(sel, text).clicked() {
                 app.selection = Selection::Tag(name.clone());
             }
         }
@@ -470,6 +544,8 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
 
             let hdr_color = if path_sel || any_op_sel {
                 ui.visuals().selection.stroke.color
+            } else if let Some(c) = data.diag_levels.item_color(&data.diag_levels.paths, path_str) {
+                c
             } else {
                 ui.visuals().text_color()
             };
@@ -488,9 +564,9 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 // Existing operations
                 for method in methods {
                     let op_sel = app.selection == Selection::Operation(path_str.clone(), method.clone());
-                    let label = RichText::new(format!("  {method}"))
-                        .monospace()
-                        .color(method_color(method));
+                    let color = data.diag_levels.op_color(path_str, method)
+                        .unwrap_or_else(|| method_color(method));
+                    let label = RichText::new(format!("  {method}")).monospace().color(color);
                     if ui.selectable_label(op_sel, label).clicked() {
                         app.selection = Selection::Operation(path_str.clone(), method.clone());
                     }
@@ -565,6 +641,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.delete_schema(&n),
                 &[("Add default paths", |app, n| app.add_default_paths_for_schema(n))],
                 Some(Selection::Schemas),
+                Some(&data.diag_levels.schemas),
             );
 
             // Request Bodies
@@ -577,6 +654,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.delete_request_body(&n),
                 &[],
                 Some(Selection::RequestBodies),
+                Some(&data.diag_levels.request_bodies),
             );
 
             // Responses
@@ -589,6 +667,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.delete_component_response(&n),
                 &[],
                 Some(Selection::ComponentResponses),
+                Some(&data.diag_levels.responses),
             );
 
             // Parameters
@@ -601,6 +680,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.delete_component_parameter(&n),
                 &[],
                 Some(Selection::ComponentParameters),
+                Some(&data.diag_levels.parameters),
             );
 
             // Examples
@@ -613,6 +693,7 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
                 |app, n| app.delete_example(&n),
                 &[],
                 Some(Selection::Examples),
+                Some(&data.diag_levels.examples),
             );
 
             // Headers (display only — no individual editor, no reorder page)
@@ -730,6 +811,7 @@ fn section_with_add(
     delete_fn: fn(&mut App, String),
     extra_actions: &[(&'static str, fn(&mut App, String))],
     header_sel: Option<Selection>,
+    diag_colors: Option<&HashMap<String, Level>>,
 ) {
     let mut dup_name: Option<String> = None;
     let mut del_name: Option<String> = None;
@@ -749,7 +831,11 @@ fn section_with_add(
     .show(ui, |ui| {
             for name in names {
                 let sel = app.selection == make_sel(name.clone());
-                let resp = ui.selectable_label(sel, format!("    {name}"));
+                let text = match diag_colors.and_then(|m| m.get(name.as_str())).and_then(|&lv| level_color(lv)) {
+                    Some(c) => RichText::new(format!("    {name}")).color(c),
+                    None    => RichText::new(format!("    {name}")),
+                };
+                let resp = ui.selectable_label(sel, text);
                 if resp.clicked() {
                     app.selection = make_sel(name.clone());
                 }
