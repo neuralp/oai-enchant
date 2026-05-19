@@ -1909,7 +1909,7 @@ fn edit_operation_security(
 }
 
 fn edit_parameter_inline(ui: &mut Ui, param: &mut Parameter, idx: usize) -> bool {
-    form_grid(ui, &format!("param_inner_{idx}"), |ui| {
+    let mut ch = form_grid(ui, &format!("param_inner_{idx}"), |ui| {
         let mut c = false;
         c |= row_str(ui, "Name:", &mut param.name);
 
@@ -1931,7 +1931,22 @@ fn edit_parameter_inline(ui: &mut Ui, param: &mut Parameter, idx: usize) -> bool
         c |= row_opt_bool(ui, "Required:", &mut param.required);
         c |= row_opt_bool(ui, "Deprecated:", &mut param.deprecated);
         c
-    })
+    });
+
+    ui.add_space(4.0);
+    ui.label(RichText::new("Schema:").strong());
+    let has_schema = param.schema.is_some();
+    if !has_schema {
+        if ui.small_button("+ Set Schema").clicked() {
+            param.schema = Some(RefOr::Item(Schema::default()));
+            ch = true;
+        }
+    } else if let Some(schema_ref) = param.schema.as_mut() {
+        if let Some(schema) = schema_ref.as_item_mut() {
+            ch |= edit_schema_inline(ui, schema, &format!("param_{idx}"), 0);
+        }
+    }
+    ch
 }
 
 // ── Request Body editor ───────────────────────────────────────────────────────
@@ -2984,7 +2999,7 @@ fn edit_component_parameter_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &
     match p {
         RefOr::Ref(r) => { ui.label(format!("$ref: {}", r.ref_)); false }
         RefOr::Item(param) => {
-            form_grid(ui, &format!("cparam_{name}_grid"), |ui| {
+            let mut ch = form_grid(ui, &format!("cparam_{name}_grid"), |ui| {
                 let mut c = false;
                 c |= row_str(ui, "Name:", &mut param.name);
                 ui.label("In:");
@@ -3003,7 +3018,22 @@ fn edit_component_parameter_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &
                 c |= row_opt_bool(ui, "Required:", &mut param.required);
                 c |= row_opt_bool(ui, "Deprecated:", &mut param.deprecated);
                 c
-            })
+            });
+
+            ui.add_space(8.0);
+            ui.label(RichText::new("Schema:").strong());
+            let has_schema = param.schema.is_some();
+            if !has_schema {
+                if ui.small_button("+ Set Schema").clicked() {
+                    param.schema = Some(RefOr::Item(Schema::default()));
+                    ch = true;
+                }
+            } else if let Some(schema_ref) = param.schema.as_mut() {
+                if let Some(schema) = schema_ref.as_item_mut() {
+                    ch |= edit_schema_inline(ui, schema, &format!("cparam_{name}"), 0);
+                }
+            }
+            ch
         }
     }
 }

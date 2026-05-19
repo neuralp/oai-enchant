@@ -156,6 +156,15 @@ pub fn lint(spec: &OpenApiSpec) -> Vec<Diagnostic> {
                                 format!("{method} {path}: broken parameter $ref '{}'", r.ref_),
                                 sel.clone(),
                             ));
+                        } else if let Some(param_name) = r.ref_.strip_prefix("#/components/parameters/") {
+                            if let Some(resolved) = comps
+                                .and_then(|c| c.parameters.get(param_name))
+                                .and_then(|p| p.as_item())
+                            {
+                                if resolved.in_ == "path" {
+                                    covered_path_params.insert(resolved.name.clone());
+                                }
+                            }
                         }
                     }
                     RefOr::Item(p) => {
