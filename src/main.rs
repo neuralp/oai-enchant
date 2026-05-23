@@ -5,6 +5,7 @@ mod editors;
 mod lint;
 mod logo;
 mod model;
+mod preferences;
 mod sidebar;
 
 fn main() -> eframe::Result<()> {

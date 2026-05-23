@@ -63,6 +63,10 @@ pub struct App {
     pub raw_editor_err: String,
     pub show_exit_dialog: bool,
     pub search_query: String,
+    pub preferences: crate::preferences::Preferences,
+    pub show_preferences: bool,
+    /// Accumulated scroll velocity for momentum/deceleration mode.
+    pub scroll_velocity: egui::Vec2,
 }
 
 /// Convert whole-number floats (e.g. `1000.0`) to integers (`1000`) throughout a
@@ -286,6 +290,10 @@ fn sync_section_key_order(raw: &mut serde_yaml::Value, updated: &serde_yaml::Val
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        let preferences = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, "preferences"))
+            .unwrap_or_default();
         Self {
             spec: None,
             current_file: None,
@@ -299,6 +307,9 @@ impl App {
             raw_editor_err: String::new(),
             show_exit_dialog: false,
             search_query: String::new(),
+            preferences,
+            show_preferences: false,
+            scroll_velocity: egui::Vec2::ZERO,
         }
     }
 
@@ -1024,7 +1035,40 @@ fn pluralize_kebab(s: &str) -> String {
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, "preferences", &self.preferences);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── Scroll speed / momentum ───────────────────────────────────────────
+        {
+            let smooth_delta = ctx.input(|i| i.smooth_scroll_delta);
+            if self.preferences.acceleration_enabled {
+                if smooth_delta.length() > 0.0 {
+                    self.scroll_velocity += smooth_delta * self.preferences.scroll_speed;
+                    // Cap to avoid runaway velocity
+                    let len = self.scroll_velocity.length();
+                    if len > 300.0 {
+                        self.scroll_velocity = self.scroll_velocity * (300.0 / len);
+                    }
+                }
+                self.scroll_velocity *= self.preferences.deceleration;
+                if self.scroll_velocity.length() < 1.0 {
+                    self.scroll_velocity = egui::Vec2::ZERO;
+                }
+                ctx.input_mut(|i| {
+                    i.smooth_scroll_delta = self.scroll_velocity;
+                });
+                if self.scroll_velocity.length() > 0.0 {
+                    ctx.request_repaint();
+                }
+            } else if self.preferences.scroll_speed != 1.0 {
+                ctx.input_mut(|i| {
+                    i.smooth_scroll_delta *= self.preferences.scroll_speed;
+                });
+            }
+        }
+
         // ── Keyboard shortcuts ────────────────────────────────────────────────
         if ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.command) {
             if self.spec.is_some() {
@@ -1091,6 +1135,13 @@ impl eframe::App for App {
                 });
         }
 
+        // ── Preferences dialog ────────────────────────────────────────────────
+        crate::preferences::show_dialog(
+            ctx,
+            &mut self.preferences,
+            &mut self.show_preferences,
+        );
+
         // ── Menu bar ──────────────────────────────────────────────────────────
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -1120,6 +1171,13 @@ impl eframe::App for App {
                         } else {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Edit", |ui| {
+                    if ui.button("Preferences…").clicked() {
+                        self.show_preferences = true;
                         ui.close_menu();
                     }
                 });
