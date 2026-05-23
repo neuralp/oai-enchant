@@ -1,6 +1,10 @@
 # OAI Enchant
 
-A native desktop OpenAPI specification editor built with Rust and [egui](https://github.com/emilk/egui), supporting OpenAPI versions up to 3.2.
+A native desktop OpenAPI specification editor built with Rust and [egui](https://github.com/emilk/egui), supporting OpenAPI versions up to 3.2.  This program was written with Claude Code using the entry level plan over a couple of weeks.  The intent was to work on both Linux and Windows.  I have not tried to get it working on Macs as I don't own one.  
+
+With the current state of OpenAPI tools there was no free and open editor for doing the down and dirty editing of specifications.  I had a need for this and was sick of trying to use Stoplight Studio which was only somewhat useful and was extremely slow with features that I didn't care for.  Not to mention that they decided to go closed source and remove all trace of the project on Github.
+
+This project is not meant for users who know nothing about API specification generation and is strictly a power user program.  In my opinion, the most important part of a client/server program is the communication specification.  Hence this program was born, so I could edit the specs for the programs I was working on.
 
 ![OAI Enchant – Operation Editor](assets/main_screenshot.png)
 
