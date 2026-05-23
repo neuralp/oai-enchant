@@ -42,12 +42,16 @@ On launch, create a new specification or open an existing YAML/JSON file via **F
 
 ## Dependencies
 
-| Crate | Purpose |
-|---|---|
-| `eframe` / `egui` | Native GUI framework |
-| `serde` + `serde_json` + `serde_yaml` | Serialization |
-| `indexmap` | Order-preserving maps for paths and components |
-| `rfd` | Native file dialogs |
+| Crate | Version | Purpose | License |
+|---|---|---|---|
+| `eframe` | 0.29.1 | Native GUI application shell (window, event loop, persistence) | MIT / Apache-2.0 |
+| `egui` | 0.29.1 | Immediate-mode GUI widgets and layout | MIT / Apache-2.0 |
+| `egui_extras` | 0.29.1 | Extra egui widgets; SVG rendering for the app icon | MIT / Apache-2.0 |
+| `serde` | 1.0 | Serialization/deserialization derive macros and traits | MIT / Apache-2.0 |
+| `serde_json` | 1.0 | JSON serialization and deserialization | MIT / Apache-2.0 |
+| `serde_yaml` | 0.9 | YAML serialization and deserialization | MIT / Apache-2.0 |
+| `indexmap` | 2.0 | Order-preserving hash map for paths and components | MIT / Apache-2.0 |
+| `rfd` | 0.14 | Native file open/save dialogs | MIT |
 
 ## License
 
