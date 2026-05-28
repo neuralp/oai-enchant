@@ -82,6 +82,16 @@ pub fn show_dialog(ctx: &egui::Context, prefs: &mut Preferences, show: &mut bool
                 });
 
             ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(concat!("OAI Enchant  #", env!("GIT_SHORT_HASH")))
+                        .weak()
+                        .size(16.0),
+                );
+            });
+            ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Close").clicked() {
                     *show = false;

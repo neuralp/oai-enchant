@@ -206,8 +206,9 @@ fn merge_yaml(original: &mut serde_yaml::Value, updated: &serde_yaml::Value) {
         .collect();
 
     // Rebuild the mapping in original key order, merging values from `updated`.
-    // Keys absent from `updated` (empty skip_serializing_if fields, x-extensions,
-    // etc.) are kept with their original values.
+    // x-extension keys absent from `updated` are preserved (they're invisible to
+    // the typed model). All other keys absent from `updated` were deleted in the
+    // model (e.g. Option::None with skip_serializing_if) and are dropped from raw.
     let mut result = serde_yaml::Mapping::new();
     for (k, orig_v) in orig_map.iter() {
         if let serde_yaml::Value::String(s) = k {
@@ -215,7 +216,7 @@ fn merge_yaml(original: &mut serde_yaml::Value, updated: &serde_yaml::Value) {
                 let mut merged = orig_v.clone();
                 merge_yaml(&mut merged, new_v);
                 result.insert(k.clone(), merged);
-            } else {
+            } else if s.starts_with("x-") {
                 result.insert(k.clone(), orig_v.clone());
             }
         }
@@ -1197,9 +1198,15 @@ impl eframe::App for App {
                     ui.label("No file open");
                 }
 
-                // File path on right side
+                // File path + build hash on right side
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(concat!("#", env!("GIT_SHORT_HASH")))
+                            .weak()
+                            .small(),
+                    );
                     if let Some(p) = &self.current_file {
+                        ui.separator();
                         ui.label(
                             egui::RichText::new(p.display().to_string())
                                 .weak()
