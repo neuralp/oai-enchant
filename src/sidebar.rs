@@ -610,12 +610,16 @@ fn show_tree(ui: &mut egui::Ui, app: &mut App, data: &SidebarData) {
         // Add path row
         ui.add_space(2.0);
         ui.horizontal(|ui| {
-            ui.add(
+            let resp = ui.add(
                 egui::TextEdit::singleline(&mut app.new_item.path)
                     .hint_text("/new-path")
-                    .desired_width(140.0),
+                    .desired_width(140.0)
+                    .return_key(None),
             );
-            if ui.small_button("+").clicked() {
+            let enter = resp.has_focus()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            let clicked = ui.small_button("+").clicked();
+            if enter || clicked {
                 let p = app.new_item.path.clone();
                 app.new_item.path.clear();
                 app.add_path(p);
@@ -871,13 +875,16 @@ fn section_with_add(
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut buf_edit)
                         .hint_text("name…")
-                        .desired_width(110.0),
+                        .desired_width(110.0)
+                        .return_key(None),
                 );
+                let enter = resp.has_focus()
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                 let add_clicked = ui.small_button("+").clicked();
                 if resp.changed() {
                     *get_buf(app) = buf_edit.clone();
                 }
-                if add_clicked && !buf_edit.is_empty() {
+                if (enter || add_clicked) && !buf_edit.is_empty() {
                     *get_buf(app) = String::new();
                     add_fn(app, buf_edit);
                 }

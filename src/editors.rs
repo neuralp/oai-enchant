@@ -2970,9 +2970,17 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
     ui.horizontal(|ui| {
         let buf_id = egui::Id::new(format!("{id}__new_prop"));
         let mut buf: String = ui.data_mut(|d| d.get_temp(buf_id).unwrap_or_default());
-        ui.add(egui::TextEdit::singleline(&mut buf).hint_text("new property name").desired_width(150.0));
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .hint_text("new property name")
+                .desired_width(150.0)
+                .return_key(None),
+        );
+        let enter = resp.has_focus()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if ui.button("+ Add Property").clicked() && !buf.is_empty() {
+        let clicked = ui.button("+ Add Property").clicked();
+        if (enter || clicked) && !buf.is_empty() {
             schema.properties.insert(buf.clone(), Box::new(Schema::default()));
             ui.data_mut(|d| d.insert_temp(buf_id, String::new()));
             ch = true;
