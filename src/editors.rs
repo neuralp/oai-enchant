@@ -2201,6 +2201,51 @@ impl CompKind {
     }
 }
 
+/// Flatten allOf/anyOf/oneOf into a plain object with merged properties.
+/// Resolves `$ref` entries against `component_schemas`; copies inline properties directly.
+fn flatten_composition(schema: &mut Schema, component_schemas: &IndexMap<String, RefOr<Schema>>) {
+    let all_entries: Vec<Box<Schema>> = {
+        let mut e = std::mem::take(&mut schema.all_of);
+        e.extend(std::mem::take(&mut schema.any_of));
+        e.extend(std::mem::take(&mut schema.one_of));
+        e
+    };
+
+    let mut merged_props: IndexMap<String, Box<Schema>> = std::mem::take(&mut schema.properties);
+    let mut merged_required: Vec<String> = std::mem::take(&mut schema.required);
+
+    for entry in &all_entries {
+        if let Some(ref_path) = &entry.ref_ {
+            let ref_name = ref_path.split('/').last().unwrap_or("");
+            if let Some(RefOr::Item(src)) = component_schemas.get(ref_name) {
+                for (k, v) in &src.properties {
+                    merged_props.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                for r in &src.required {
+                    if !merged_required.contains(r) {
+                        merged_required.push(r.clone());
+                    }
+                }
+            }
+        } else {
+            for (k, v) in &entry.properties {
+                merged_props.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            for r in &entry.required {
+                if !merged_required.contains(r) {
+                    merged_required.push(r.clone());
+                }
+            }
+        }
+    }
+
+    schema.properties = merged_props;
+    schema.required = merged_required;
+    schema.discriminator = None;
+    schema.set_type_str("object");
+    // all_of/any_of/one_of were already emptied by mem::take above
+}
+
 fn edit_schema_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
     ui.heading("Schema");
 
@@ -2246,12 +2291,89 @@ fn edit_schema_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool 
         return true;
     }
 
+    let flatten_dialog_id = egui::Id::new(format!("{name}__flatten_dialog"));
+    let mode_key          = egui::Id::new(format!("{name}__mode"));
+    let dialog_open: bool = ui.data(|d| d.get_temp(flatten_dialog_id).unwrap_or(false));
+
+    let mut do_convert     = false;
+    let mut do_switch_only = false;
+    let mut do_cancel      = false;
+
+    if dialog_open {
+        egui::Window::new("Convert Composition to Object?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(420.0);
+                ui.label("This schema uses composition (allOf / anyOf / oneOf).");
+                ui.label("Would you like to convert it to a regular object by merging all referenced schemas' properties?");
+                ui.add_space(6.0);
+                ui.label(RichText::new("Properties from $ref schemas will be copied inline. Composition entries will be removed.").weak().small());
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Convert to Object").clicked()       { do_convert     = true; }
+                    if ui.button("Switch (no conversion)").clicked()  { do_switch_only = true; }
+                    if ui.button("Cancel").clicked()                  { do_cancel      = true; }
+                });
+            });
+    }
+
+    // Handle dialog result before rendering the editor.
+    if do_cancel {
+        ui.data_mut(|d| {
+            d.insert_temp(flatten_dialog_id, false);
+            d.insert_temp(mode_key, SchemaMode::Composition);
+        });
+    }
+
+    if do_convert {
+        let schemas_clone = spec.components.as_ref()
+            .map(|c| c.schemas.clone())
+            .unwrap_or_default();
+        if let Some(comps) = spec.components.as_mut() {
+            if let Some(RefOr::Item(schema)) = comps.schemas.get_mut(name) {
+                flatten_composition(schema, &schemas_clone);
+            }
+        }
+        ui.data_mut(|d| {
+            d.insert_temp(flatten_dialog_id, false);
+            d.insert_temp(mode_key, SchemaMode::Regular);
+        });
+        return true;
+    }
+
+    if do_switch_only {
+        if let Some(comps) = spec.components.as_mut() {
+            if let Some(RefOr::Item(schema)) = comps.schemas.get_mut(name) {
+                schema.all_of.clear();
+                schema.any_of.clear();
+                schema.one_of.clear();
+            }
+        }
+        ui.data_mut(|d| {
+            d.insert_temp(flatten_dialog_id, false);
+            d.insert_temp(mode_key, SchemaMode::Regular);
+        });
+        return true;
+    }
+
     ui.add_space(4.0);
     let Some(comps) = spec.components.as_mut() else { ui.label("No components."); return false };
     let Some(schema_ref) = comps.schemas.get_mut(name) else { ui.label("Schema not found."); return false };
     match schema_ref {
         RefOr::Ref(r) => { ui.label(format!("$ref: {}", r.ref_)); false }
-        RefOr::Item(schema) => edit_schema_inline(ui, schema, name, 0),
+        RefOr::Item(schema) => {
+            let ch = edit_schema_inline(ui, schema, name, 0);
+            // Pick up a flatten request signalled by the mode toggle inside edit_schema_inline.
+            let pending = ui.data_mut(|d| {
+                d.remove_temp::<bool>(egui::Id::new(format!("{name}__pending_flatten"))).unwrap_or(false)
+            });
+            if pending {
+                ui.data_mut(|d| d.insert_temp(flatten_dialog_id, true));
+            }
+            ch
+        }
     }
 }
 
@@ -2292,8 +2414,16 @@ pub fn edit_schema_inline(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new("Model type:").strong());
-        if ui.selectable_label(mode == SchemaMode::Regular, "  Regular  ").clicked() {
-            mode = SchemaMode::Regular;
+        if ui.selectable_label(mode == SchemaMode::Regular, "  Regular  ").clicked()
+            && mode != SchemaMode::Regular
+        {
+            if has_comp {
+                // Ask the parent editor (which has spec access) whether to flatten.
+                ui.data_mut(|d| d.insert_temp(egui::Id::new(format!("{id}__pending_flatten")), true));
+                // Leave mode as Composition until the dialog resolves.
+            } else {
+                mode = SchemaMode::Regular;
+            }
         }
         if ui.selectable_label(mode == SchemaMode::Composition, "  Composition  ").clicked() {
             mode = SchemaMode::Composition;
