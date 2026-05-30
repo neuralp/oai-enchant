@@ -810,6 +810,24 @@ impl App {
 
     // ── Default CRUD paths ────────────────────────────────────────────────────
 
+    fn rename_raw_component_key(&mut self, section: &str, old_name: &str, new_name: &str) {
+        if let Some(raw) = &mut self.raw {
+            let comps_key   = serde_yaml::Value::String("components".to_string());
+            let section_key = serde_yaml::Value::String(section.to_string());
+            let old_k       = serde_yaml::Value::String(old_name.to_string());
+            let new_k       = serde_yaml::Value::String(new_name.to_string());
+            if let Some(serde_yaml::Value::Mapping(comps_map)) =
+                raw.as_mapping_mut().and_then(|m| m.get_mut(&comps_key))
+            {
+                if let Some(serde_yaml::Value::Mapping(section_map)) = comps_map.get_mut(&section_key) {
+                    if let Some(v) = section_map.remove(&old_k) {
+                        section_map.insert(new_k, v);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn add_default_paths_for_schema(&mut self, schema_name: String) {
         if self.spec.is_none() { return; }
 
@@ -1323,6 +1341,37 @@ impl eframe::App for App {
                 // Navigate away when a tag is deleted.
                 if ui.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("oa_tag_deleted"))).unwrap_or(false) {
                     self.selection = Selection::Tags;
+                }
+                // Keep selection in sync when a component is renamed.
+                if let Some((old, new)) = ui.data_mut(|d| {
+                    d.remove_temp::<(String, String)>(egui::Id::new("oa_schema_rename"))
+                }) {
+                    self.rename_raw_component_key("schemas", &old, &new);
+                    self.selection = Selection::Schema(new);
+                }
+                if let Some((old, new)) = ui.data_mut(|d| {
+                    d.remove_temp::<(String, String)>(egui::Id::new("oa_request_body_rename"))
+                }) {
+                    self.rename_raw_component_key("requestBodies", &old, &new);
+                    self.selection = Selection::RequestBody(new);
+                }
+                if let Some((old, new)) = ui.data_mut(|d| {
+                    d.remove_temp::<(String, String)>(egui::Id::new("oa_response_rename"))
+                }) {
+                    self.rename_raw_component_key("responses", &old, &new);
+                    self.selection = Selection::ComponentResponse(new);
+                }
+                if let Some((old, new)) = ui.data_mut(|d| {
+                    d.remove_temp::<(String, String)>(egui::Id::new("oa_component_parameter_rename"))
+                }) {
+                    self.rename_raw_component_key("parameters", &old, &new);
+                    self.selection = Selection::ComponentParameter(new);
+                }
+                if let Some((old, new)) = ui.data_mut(|d| {
+                    d.remove_temp::<(String, String)>(egui::Id::new("oa_example_rename"))
+                }) {
+                    self.rename_raw_component_key("examples", &old, &new);
+                    self.selection = Selection::Example(new);
                 }
             }
         });

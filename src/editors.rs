@@ -2202,7 +2202,50 @@ impl CompKind {
 }
 
 fn edit_schema_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
-    ui.heading(format!("Schema: {name}"));
+    ui.heading("Schema");
+
+    let buf_id     = egui::Id::new("schema_name_buf");
+    let tracked_id = egui::Id::new("schema_name_tracked");
+    let tracked: String = ui.data(|d| d.get_temp(tracked_id).unwrap_or_default());
+    if tracked != name {
+        ui.data_mut(|d| {
+            d.insert_temp(tracked_id, name.to_string());
+            d.insert_temp(buf_id, name.to_string());
+        });
+    }
+    let mut buf: String = ui.data(|d| d.get_temp(buf_id).unwrap_or_else(|| name.to_string()));
+
+    let mut renamed_to: Option<String> = None;
+    ui.horizontal(|ui| {
+        ui.label("Name:");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .desired_width(240.0)
+                .hint_text("SchemaName"),
+        );
+        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+            if spec.components.as_ref().map_or(false, |c| c.schemas.contains_key(&buf)) {
+                ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
+                ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
+            } else {
+                renamed_to = Some(buf.clone());
+            }
+        }
+    });
+
+    if let Some(new_name) = renamed_to {
+        if let Some(comps) = spec.components.as_mut() {
+            let reordered: Vec<(String, RefOr<Schema>)> = std::mem::take(&mut comps.schemas)
+                .into_iter()
+                .map(|(k, v)| if k == name { (new_name.clone(), v) } else { (k, v) })
+                .collect();
+            comps.schemas = reordered.into_iter().collect();
+        }
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_schema_rename"), (name.to_string(), new_name)));
+        return true;
+    }
+
     ui.add_space(4.0);
     let Some(comps) = spec.components.as_mut() else { ui.label("No components."); return false };
     let Some(schema_ref) = comps.schemas.get_mut(name) else { ui.label("Schema not found."); return false };
@@ -2976,7 +3019,50 @@ fn edit_composition_entry(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32
 // ── Component-level editors ───────────────────────────────────────────────────
 
 fn edit_request_body_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
-    ui.heading(format!("Request Body: {name}"));
+    ui.heading("Request Body");
+
+    let buf_id     = egui::Id::new("req_body_name_buf");
+    let tracked_id = egui::Id::new("req_body_name_tracked");
+    let tracked: String = ui.data(|d| d.get_temp(tracked_id).unwrap_or_default());
+    if tracked != name {
+        ui.data_mut(|d| {
+            d.insert_temp(tracked_id, name.to_string());
+            d.insert_temp(buf_id, name.to_string());
+        });
+    }
+    let mut buf: String = ui.data(|d| d.get_temp(buf_id).unwrap_or_else(|| name.to_string()));
+
+    let mut renamed_to: Option<String> = None;
+    ui.horizontal(|ui| {
+        ui.label("Name:");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .desired_width(240.0)
+                .hint_text("RequestBodyName"),
+        );
+        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+            if spec.components.as_ref().map_or(false, |c| c.request_bodies.contains_key(&buf)) {
+                ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
+                ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
+            } else {
+                renamed_to = Some(buf.clone());
+            }
+        }
+    });
+
+    if let Some(new_name) = renamed_to {
+        if let Some(comps) = spec.components.as_mut() {
+            let reordered: Vec<(String, RefOr<RequestBody>)> = std::mem::take(&mut comps.request_bodies)
+                .into_iter()
+                .map(|(k, v)| if k == name { (new_name.clone(), v) } else { (k, v) })
+                .collect();
+            comps.request_bodies = reordered.into_iter().collect();
+        }
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_request_body_rename"), (name.to_string(), new_name)));
+        return true;
+    }
+
     ui.add_space(4.0);
     let Some(comps) = spec.components.as_mut() else { return false };
     let Some(rb) = comps.request_bodies.get_mut(name) else { ui.label("Not found."); return false };
@@ -2984,7 +3070,50 @@ fn edit_request_body_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) ->
 }
 
 fn edit_component_response_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
-    ui.heading(format!("Response: {name}"));
+    ui.heading("Response");
+
+    let buf_id     = egui::Id::new("comp_resp_name_buf");
+    let tracked_id = egui::Id::new("comp_resp_name_tracked");
+    let tracked: String = ui.data(|d| d.get_temp(tracked_id).unwrap_or_default());
+    if tracked != name {
+        ui.data_mut(|d| {
+            d.insert_temp(tracked_id, name.to_string());
+            d.insert_temp(buf_id, name.to_string());
+        });
+    }
+    let mut buf: String = ui.data(|d| d.get_temp(buf_id).unwrap_or_else(|| name.to_string()));
+
+    let mut renamed_to: Option<String> = None;
+    ui.horizontal(|ui| {
+        ui.label("Name:");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .desired_width(240.0)
+                .hint_text("ResponseName"),
+        );
+        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+            if spec.components.as_ref().map_or(false, |c| c.responses.contains_key(&buf)) {
+                ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
+                ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
+            } else {
+                renamed_to = Some(buf.clone());
+            }
+        }
+    });
+
+    if let Some(new_name) = renamed_to {
+        if let Some(comps) = spec.components.as_mut() {
+            let reordered: Vec<(String, RefOr<Response>)> = std::mem::take(&mut comps.responses)
+                .into_iter()
+                .map(|(k, v)| if k == name { (new_name.clone(), v) } else { (k, v) })
+                .collect();
+            comps.responses = reordered.into_iter().collect();
+        }
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_response_rename"), (name.to_string(), new_name)));
+        return true;
+    }
+
     ui.add_space(4.0);
     let Some(comps) = spec.components.as_mut() else { return false };
     let Some(resp) = comps.responses.get_mut(name) else { ui.label("Not found."); return false };
@@ -2992,7 +3121,50 @@ fn edit_component_response_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &s
 }
 
 fn edit_component_parameter_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
-    ui.heading(format!("Parameter: {name}"));
+    ui.heading("Parameter");
+
+    let buf_id     = egui::Id::new("comp_param_name_buf");
+    let tracked_id = egui::Id::new("comp_param_name_tracked");
+    let tracked: String = ui.data(|d| d.get_temp(tracked_id).unwrap_or_default());
+    if tracked != name {
+        ui.data_mut(|d| {
+            d.insert_temp(tracked_id, name.to_string());
+            d.insert_temp(buf_id, name.to_string());
+        });
+    }
+    let mut buf: String = ui.data(|d| d.get_temp(buf_id).unwrap_or_else(|| name.to_string()));
+
+    let mut renamed_to: Option<String> = None;
+    ui.horizontal(|ui| {
+        ui.label("Name:");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .desired_width(240.0)
+                .hint_text("ParameterName"),
+        );
+        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+            if spec.components.as_ref().map_or(false, |c| c.parameters.contains_key(&buf)) {
+                ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
+                ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
+            } else {
+                renamed_to = Some(buf.clone());
+            }
+        }
+    });
+
+    if let Some(new_name) = renamed_to {
+        if let Some(comps) = spec.components.as_mut() {
+            let reordered: Vec<(String, RefOr<Parameter>)> = std::mem::take(&mut comps.parameters)
+                .into_iter()
+                .map(|(k, v)| if k == name { (new_name.clone(), v) } else { (k, v) })
+                .collect();
+            comps.parameters = reordered.into_iter().collect();
+        }
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_component_parameter_rename"), (name.to_string(), new_name)));
+        return true;
+    }
+
     ui.add_space(4.0);
     let Some(comps) = spec.components.as_mut() else { return false };
     let Some(p) = comps.parameters.get_mut(name) else { ui.label("Not found."); return false };
@@ -3097,7 +3269,50 @@ fn example_uses(spec: &OpenApiSpec, ref_path: &str) -> Vec<(String, Option<(Stri
 }
 
 fn edit_example_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool {
-    ui.heading(format!("Example: {name}"));
+    ui.heading("Example");
+
+    let buf_id     = egui::Id::new("example_name_buf");
+    let tracked_id = egui::Id::new("example_name_tracked");
+    let tracked: String = ui.data(|d| d.get_temp(tracked_id).unwrap_or_default());
+    if tracked != name {
+        ui.data_mut(|d| {
+            d.insert_temp(tracked_id, name.to_string());
+            d.insert_temp(buf_id, name.to_string());
+        });
+    }
+    let mut buf: String = ui.data(|d| d.get_temp(buf_id).unwrap_or_else(|| name.to_string()));
+
+    let mut renamed_to: Option<String> = None;
+    ui.horizontal(|ui| {
+        ui.label("Name:");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .desired_width(240.0)
+                .hint_text("ExampleName"),
+        );
+        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+            if spec.components.as_ref().map_or(false, |c| c.examples.contains_key(&buf)) {
+                ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
+                ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
+            } else {
+                renamed_to = Some(buf.clone());
+            }
+        }
+    });
+
+    if let Some(new_name) = renamed_to {
+        if let Some(comps) = spec.components.as_mut() {
+            let reordered: Vec<(String, RefOr<OaExample>)> = std::mem::take(&mut comps.examples)
+                .into_iter()
+                .map(|(k, v)| if k == name { (new_name.clone(), v) } else { (k, v) })
+                .collect();
+            comps.examples = reordered.into_iter().collect();
+        }
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_example_rename"), (name.to_string(), new_name)));
+        return true;
+    }
+
     ui.add_space(4.0);
 
     // Collect uses while spec is still fully accessible (before mutable sub-borrows).
