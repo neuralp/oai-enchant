@@ -3321,7 +3321,7 @@ fn edit_component_parameter_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &
 
     let mut renamed_to: Option<String> = None;
     ui.horizontal(|ui| {
-        ui.label("Name:");
+        ui.label("Component Key:");
         let resp = ui.add(
             egui::TextEdit::singleline(&mut buf)
                 .desired_width(240.0)
@@ -3361,7 +3361,7 @@ fn edit_component_parameter_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &
         RefOr::Item(param) => {
             let mut ch = form_grid(ui, &format!("cparam_{name}_grid"), |ui| {
                 let mut c = false;
-                c |= row_str(ui, "Name:", &mut param.name);
+                c |= row_str(ui, "Parameter Name:", &mut param.name);
                 ui.label("In:");
                 egui::ComboBox::from_id_salt(format!("cparam_{name}_in"))
                     .selected_text(param.in_.as_str())

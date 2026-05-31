@@ -301,7 +301,7 @@ impl App {
             .storage
             .and_then(|s| eframe::get_value::<f32>(s, "sidebar_width"))
             .unwrap_or(250.0)
-            .clamp(150.0, 400.0);
+            .clamp(150.0, 800.0);
         Self {
             spec: None,
             current_file: None,
@@ -1288,29 +1288,48 @@ impl eframe::App for App {
         let sidebar_panel = egui::SidePanel::left("sidebar")
             .resizable(false)
             .exact_width(self.sidebar_width)
+            .show_separator_line(false)
+            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(
+                egui::Margin { right: 24.0, ..egui::Margin::same(8.0) },
+            ))
             .show(ctx, |ui| {
-                crate::sidebar::show(ui, self);
+                // Render sidebar into a child_ui so its content overflow doesn't
+                // propagate into this panel's content_ui.min_rect().  Then allocate
+                // exactly max_rect here so response.rect.right() == sidebar_width.
+                // Without this, overflowing items (long paths, etc.) push response.rect
+                // far beyond the clip boundary, which causes allocate_left_panel to
+                // claim too much space and leaves the CentralPanel pinned at the wrong x.
+                let inner = ui.max_rect();
+                let mut child = ui.child_ui(inner, *ui.layout(), None);
+                child.set_clip_rect(inner);
+                crate::sidebar::show(&mut child, self);
+                ui.allocate_rect(inner, egui::Sense::hover());
             });
 
         // Manual resize — track pointer position against the panel boundary using
         // raw input.  We latch sidebar_resizing on press so the drag continues
         // even after the boundary has moved away from the original press origin.
         {
-            let panel_right = sidebar_panel.response.rect.right();
-            let (near, primary_down, drag_delta_x) = ctx.input(|i| {
+            // Use response.rect.left() (panel origin, immune to content overflow) + sidebar_width
+            // rather than response.rect.right(), which follows content_ui.min_rect() and can
+            // exceed the clip boundary when sidebar items are wider than the panel.
+            let panel_right = sidebar_panel.response.rect.left() + self.sidebar_width;
+            let (near_cursor, press_near, primary_down, drag_delta_x) = ctx.input(|i| {
                 let latest_x = i.pointer.latest_pos().map(|p| p.x);
-                let near = latest_x.map(|x| (x - panel_right).abs() < 5.0).unwrap_or(false);
+                let press_x  = i.pointer.press_origin().map(|p| p.x);
+                let near_cursor = latest_x.map(|x| (x - panel_right).abs() < 5.0).unwrap_or(false);
+                let press_near  = press_x.map(|x| (x - panel_right).abs() < 5.0).unwrap_or(false);
                 let down = i.pointer.primary_down();
                 let delta = if i.pointer.is_decidedly_dragging() {
                     i.pointer.delta().x
                 } else {
                     0.0
                 };
-                (near, down, delta)
+                (near_cursor, press_near, down, delta)
             });
 
-            // Latch on: press started near the boundary and drag is underway.
-            if near && drag_delta_x != 0.0 {
+            // Latch on: press originated near the boundary and a drag is underway.
+            if press_near && drag_delta_x != 0.0 {
                 self.sidebar_resizing = true;
             }
             // Latch off: pointer released.
@@ -1318,12 +1337,22 @@ impl eframe::App for App {
                 self.sidebar_resizing = false;
             }
 
-            if near || self.sidebar_resizing {
+            if near_cursor || self.sidebar_resizing {
                 ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
             if self.sidebar_resizing {
-                self.sidebar_width = (self.sidebar_width + drag_delta_x).clamp(150.0, 400.0);
+                self.sidebar_width = (self.sidebar_width + drag_delta_x).clamp(150.0, 800.0);
+                ctx.request_repaint();
             }
+
+            // Draw separator line at the true panel boundary (not the overflowed response.rect).
+            let stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
+            let panel_rect = sidebar_panel.response.rect;
+            ctx.layer_painter(egui::LayerId::background()).vline(
+                panel_right - 1.0,
+                panel_rect.y_range(),
+                stroke,
+            );
         }
 
         // ── Editor ────────────────────────────────────────────────────────────
@@ -1331,7 +1360,11 @@ impl eframe::App for App {
         let fmt    = self.format;
         let mut raw_apply: Option<OpenApiSpec> = None;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(
+                egui::Margin { left: 24.0, ..egui::Margin::same(8.0) },
+            ))
+            .show(ctx, |ui| {
             if is_raw {
                 raw_apply = crate::editors::show_raw_editor(
                     ui, fmt,
