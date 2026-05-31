@@ -439,7 +439,7 @@ fn json_nonstring(
 
 fn row_str(ui: &mut Ui, label: &str, val: &mut String) -> bool {
     ui.label(label);
-    let r = ui.text_edit_singleline(val).changed();
+    let r = ui.add(egui::TextEdit::singleline(val).return_key(None)).changed();
     ui.end_row();
     r
 }
@@ -447,7 +447,7 @@ fn row_str(ui: &mut Ui, label: &str, val: &mut String) -> bool {
 fn row_opt_str(ui: &mut Ui, label: &str, val: &mut Option<String>) -> bool {
     let mut s = val.clone().unwrap_or_default();
     ui.label(label);
-    let r = ui.text_edit_singleline(&mut s).changed();
+    let r = ui.add(egui::TextEdit::singleline(&mut s).return_key(None)).changed();
     ui.end_row();
     if r {
         *val = if s.is_empty() { None } else { Some(s) };
@@ -484,7 +484,7 @@ fn row_opt_bool(ui: &mut Ui, label: &str, val: &mut Option<bool>) -> bool {
 fn row_opt_u64(ui: &mut Ui, label: &str, val: &mut Option<u64>) -> bool {
     let mut s = val.map(|v| v.to_string()).unwrap_or_default();
     ui.label(label);
-    let r = ui.text_edit_singleline(&mut s).changed();
+    let r = ui.add(egui::TextEdit::singleline(&mut s).return_key(None)).changed();
     ui.end_row();
     if r {
         *val = s.parse().ok();
@@ -495,7 +495,7 @@ fn row_opt_u64(ui: &mut Ui, label: &str, val: &mut Option<u64>) -> bool {
 fn row_opt_f64(ui: &mut Ui, label: &str, val: &mut Option<f64>) -> bool {
     let mut s = val.map(|v| v.to_string()).unwrap_or_default();
     ui.label(label);
-    let r = ui.text_edit_singleline(&mut s).changed();
+    let r = ui.add(egui::TextEdit::singleline(&mut s).return_key(None)).changed();
     ui.end_row();
     if r {
         *val = s.parse().ok();
@@ -1334,11 +1334,13 @@ fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, new_item: &mut New
             egui::TextEdit::singleline(&mut buf)
                 .font(egui::TextStyle::Monospace)
                 .desired_width(340.0)
-                .hint_text("/new-path"),
+                .hint_text("/new-path")
+                .return_key(None),
         );
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-
-        if resp.lost_focus() && !buf.trim().is_empty() && buf != path {
+        let enter = resp.has_focus()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if (resp.lost_focus() || enter) && !buf.trim().is_empty() && buf != path {
             let new_key = if buf.starts_with('/') { buf.clone() } else { format!("/{buf}") };
             if spec.paths.contains_key(&new_key) {
                 // Conflict — reset buffer
@@ -2266,10 +2268,13 @@ fn edit_schema_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool 
         let resp = ui.add(
             egui::TextEdit::singleline(&mut buf)
                 .desired_width(240.0)
-                .hint_text("SchemaName"),
+                .hint_text("SchemaName")
+                .return_key(None),
         );
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+        let enter = resp.has_focus()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if (resp.lost_focus() || enter) && !buf.trim().is_empty() && buf != name {
             if spec.components.as_ref().map_or(false, |c| c.schemas.contains_key(&buf)) {
                 ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
                 ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
@@ -2556,6 +2561,32 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
         let mut c = false;
         c |= row_opt_u64(ui, "Min Properties:", &mut schema.min_properties);
         c |= row_opt_u64(ui, "Max Properties:", &mut schema.max_properties);
+
+        ui.label("Additional Properties:");
+        let cur = match schema.additional_properties.as_deref() {
+            Some(AdditionalProperties::Bool(true)) => "True",
+            Some(AdditionalProperties::Bool(false)) => "False",
+            _ => "",
+        };
+        egui::ComboBox::from_id_salt(format!("{id}__add_props"))
+            .selected_text(cur)
+            .width(80.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(cur == "", "").clicked() {
+                    schema.additional_properties = None;
+                    c = true;
+                }
+                if ui.selectable_label(cur == "True", "True").clicked() {
+                    schema.additional_properties = Some(Box::new(AdditionalProperties::Bool(true)));
+                    c = true;
+                }
+                if ui.selectable_label(cur == "False", "False").clicked() {
+                    schema.additional_properties = Some(Box::new(AdditionalProperties::Bool(false)));
+                    c = true;
+                }
+            });
+        ui.end_row();
+
         c
     });
 
@@ -2608,10 +2639,13 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
                             let nresp = ui.add(
                                 egui::TextEdit::singleline(&mut nbuf)
                                     .desired_width(120.0)
-                                    .hint_text("name"),
+                                    .hint_text("name")
+                                    .return_key(None),
                             );
                             ui.data_mut(|d| d.insert_temp(nbuf_id, nbuf.clone()));
-                            if nresp.lost_focus() && !nbuf.is_empty() && nbuf != *prop_name {
+                            let nenter = nresp.has_focus()
+                                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                            if (nresp.lost_focus() || nenter) && !nbuf.is_empty() && nbuf != *prop_name {
                                 rename_to = Some(nbuf);
                             }
 
@@ -2653,6 +2687,13 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
                             let mut dep = prop_schema.deprecated.unwrap_or(false);
                             if toggle_switch(ui, &mut dep).changed() {
                                 prop_schema.deprecated = Some(dep);
+                                ch = true;
+                            }
+
+                            ui.label("Nullable:");
+                            let mut nullable = prop_schema.nullable.unwrap_or(false);
+                            if toggle_switch(ui, &mut nullable).changed() {
+                                prop_schema.nullable = Some(nullable);
                                 ch = true;
                             }
 
@@ -3176,10 +3217,13 @@ fn edit_request_body_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) ->
         let resp = ui.add(
             egui::TextEdit::singleline(&mut buf)
                 .desired_width(240.0)
-                .hint_text("RequestBodyName"),
+                .hint_text("RequestBodyName")
+                .return_key(None),
         );
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+        let enter = resp.has_focus()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if (resp.lost_focus() || enter) && !buf.trim().is_empty() && buf != name {
             if spec.components.as_ref().map_or(false, |c| c.request_bodies.contains_key(&buf)) {
                 ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
                 ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
@@ -3227,10 +3271,13 @@ fn edit_component_response_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &s
         let resp = ui.add(
             egui::TextEdit::singleline(&mut buf)
                 .desired_width(240.0)
-                .hint_text("ResponseName"),
+                .hint_text("ResponseName")
+                .return_key(None),
         );
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+        let enter = resp.has_focus()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if (resp.lost_focus() || enter) && !buf.trim().is_empty() && buf != name {
             if spec.components.as_ref().map_or(false, |c| c.responses.contains_key(&buf)) {
                 ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
                 ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
@@ -3278,10 +3325,13 @@ fn edit_component_parameter_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &
         let resp = ui.add(
             egui::TextEdit::singleline(&mut buf)
                 .desired_width(240.0)
-                .hint_text("ParameterName"),
+                .hint_text("ParameterName")
+                .return_key(None),
         );
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+        let enter = resp.has_focus()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if (resp.lost_focus() || enter) && !buf.trim().is_empty() && buf != name {
             if spec.components.as_ref().map_or(false, |c| c.parameters.contains_key(&buf)) {
                 ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
                 ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());
@@ -3426,10 +3476,13 @@ fn edit_example_by_name(ui: &mut Ui, spec: &mut OpenApiSpec, name: &str) -> bool
         let resp = ui.add(
             egui::TextEdit::singleline(&mut buf)
                 .desired_width(240.0)
-                .hint_text("ExampleName"),
+                .hint_text("ExampleName")
+                .return_key(None),
         );
         ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
-        if resp.lost_focus() && !buf.trim().is_empty() && buf != name {
+        let enter = resp.has_focus()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if (resp.lost_focus() || enter) && !buf.trim().is_empty() && buf != name {
             if spec.components.as_ref().map_or(false, |c| c.examples.contains_key(&buf)) {
                 ui.data_mut(|d| d.insert_temp(buf_id, name.to_string()));
                 ui.label(RichText::new("name already exists").color(egui::Color32::from_rgb(220, 80, 80)).small());

@@ -67,6 +67,8 @@ pub struct App {
     pub show_preferences: bool,
     /// Accumulated scroll velocity for momentum/deceleration mode.
     pub scroll_velocity: egui::Vec2,
+    pub sidebar_width: f32,
+    sidebar_resizing: bool,
 }
 
 /// Convert whole-number floats (e.g. `1000.0`) to integers (`1000`) throughout a
@@ -295,6 +297,11 @@ impl App {
             .storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
+        let sidebar_width = cc
+            .storage
+            .and_then(|s| eframe::get_value::<f32>(s, "sidebar_width"))
+            .unwrap_or(250.0)
+            .clamp(150.0, 400.0);
         Self {
             spec: None,
             current_file: None,
@@ -311,6 +318,8 @@ impl App {
             preferences,
             show_preferences: false,
             scroll_velocity: egui::Vec2::ZERO,
+            sidebar_width,
+            sidebar_resizing: false,
         }
     }
 
@@ -1056,6 +1065,7 @@ fn pluralize_kebab(s: &str) -> String {
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "preferences", &self.preferences);
+        eframe::set_value(storage, "sidebar_width", &self.sidebar_width);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1275,14 +1285,46 @@ impl eframe::App for App {
         }
 
         // ── Sidebar ───────────────────────────────────────────────────────────
-        egui::SidePanel::left("sidebar")
-            .resizable(true)
-            .default_width(250.0)
-            .min_width(150.0)
-            .max_width(400.0)
+        let sidebar_panel = egui::SidePanel::left("sidebar")
+            .resizable(false)
+            .exact_width(self.sidebar_width)
             .show(ctx, |ui| {
                 crate::sidebar::show(ui, self);
             });
+
+        // Manual resize — track pointer position against the panel boundary using
+        // raw input.  We latch sidebar_resizing on press so the drag continues
+        // even after the boundary has moved away from the original press origin.
+        {
+            let panel_right = sidebar_panel.response.rect.right();
+            let (near, primary_down, drag_delta_x) = ctx.input(|i| {
+                let latest_x = i.pointer.latest_pos().map(|p| p.x);
+                let near = latest_x.map(|x| (x - panel_right).abs() < 5.0).unwrap_or(false);
+                let down = i.pointer.primary_down();
+                let delta = if i.pointer.is_decidedly_dragging() {
+                    i.pointer.delta().x
+                } else {
+                    0.0
+                };
+                (near, down, delta)
+            });
+
+            // Latch on: press started near the boundary and drag is underway.
+            if near && drag_delta_x != 0.0 {
+                self.sidebar_resizing = true;
+            }
+            // Latch off: pointer released.
+            if !primary_down {
+                self.sidebar_resizing = false;
+            }
+
+            if near || self.sidebar_resizing {
+                ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if self.sidebar_resizing {
+                self.sidebar_width = (self.sidebar_width + drag_delta_x).clamp(150.0, 400.0);
+            }
+        }
 
         // ── Editor ────────────────────────────────────────────────────────────
         let is_raw = self.selection == Selection::RawEditor;
