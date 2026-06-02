@@ -1311,6 +1311,39 @@ fn show_security_schemes_list(ui: &mut Ui, spec: &mut OpenApiSpec) -> bool {
     false
 }
 
+fn generate_operation_id(method: &str, path: &str) -> String {
+    let mut parts = vec![method.to_lowercase()];
+    for segment in path.split('/').filter(|s| !s.is_empty()) {
+        if segment.starts_with('{') && segment.ends_with('}') {
+            let param = &segment[1..segment.len() - 1];
+            parts.push("by".to_string());
+            parts.extend(split_camel(param).into_iter().map(|s| s.to_lowercase()));
+        } else {
+            parts.extend(split_camel(segment).into_iter().map(|s| s.to_lowercase()));
+        }
+    }
+    parts.join("-")
+}
+
+fn split_camel(s: &str) -> Vec<String> {
+    // Split on existing dashes/underscores and camelCase boundaries
+    let mut segments: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for (i, ch) in s.char_indices() {
+        if ch == '-' || ch == '_' {
+            if !current.is_empty() { segments.push(current.clone()); current.clear(); }
+        } else if ch.is_uppercase() && i > 0 && !current.is_empty() {
+            segments.push(current.clone());
+            current.clear();
+            current.push(ch);
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() { segments.push(current); }
+    if segments.is_empty() { vec![s.to_string()] } else { segments }
+}
+
 fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, new_item: &mut NewItemBuffers) -> bool {
     // ── Editable path ─────────────────────────────────────────────────────────
     // Use a tracking key so the buffer resets whenever the user navigates to a
@@ -1468,7 +1501,9 @@ fn edit_path(ui: &mut Ui, spec: &mut OpenApiSpec, path: &str, new_item: &mut New
                     ));
                 }
             } else if ui.small_button("+ Add").clicked() {
-                item.set_operation(method, Some(Operation::default()));
+                let mut op = Operation::default();
+                op.operation_id = Some(generate_operation_id(method, path));
+                item.set_operation(method, Some(op));
                 ch = true;
             }
         });
