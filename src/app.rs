@@ -1300,7 +1300,7 @@ impl eframe::App for App {
                 // far beyond the clip boundary, which causes allocate_left_panel to
                 // claim too much space and leaves the CentralPanel pinned at the wrong x.
                 let inner = ui.max_rect();
-                let mut child = ui.child_ui(inner, *ui.layout(), None);
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(*ui.layout()));
                 child.set_clip_rect(inner);
                 crate::sidebar::show(&mut child, self);
                 ui.allocate_rect(inner, egui::Sense::hover());

@@ -164,13 +164,31 @@ pub fn show_raw_editor(
         .max_height(editor_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(buf)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(40)
-                    .layouter(&mut layouter),
-            );
+            ui.horizontal_top(|ui| {
+                // Line number gutter
+                let line_count = buf.lines().count().max(1);
+                let digits = line_count.to_string().len();
+                let gutter: String = (1..=line_count)
+                    .map(|n| format!("{n:>digits$}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(gutter)
+                            .monospace()
+                            .color(egui::Color32::from_gray(100)),
+                    )
+                    .selectable(false),
+                );
+                ui.separator();
+                ui.add(
+                    egui::TextEdit::multiline(buf)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(40)
+                        .layouter(&mut layouter),
+                );
+            });
         });
 
     // ── Parse-error panel ─────────────────────────────────────────────────────
@@ -1693,12 +1711,54 @@ fn edit_operation(
     section_header(ui, "Responses");
     let resp_codes: Vec<String> = op.responses.keys().cloned().collect();
     let mut to_remove_resp: Option<String> = None;
+    let mut rename_resp: Option<(String, String)> = None;
 
     for code in &resp_codes {
         if let Some(resp_ref) = op.responses.get_mut(code) {
             egui::CollapsingHeader::new(format!("  {code}"))
                 .id_salt(format!("op_resp_{code}"))
                 .show(ui, |ui| {
+                    // Code editor
+                    let buf_id = egui::Id::new(format!("op_resp_code_buf_{code}"));
+                    let mut buf: String =
+                        ui.data(|d| d.get_temp(buf_id).unwrap_or_else(|| code.clone()));
+                    ui.horizontal(|ui| {
+                        ui.label("Code:");
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut buf)
+                                .desired_width(80.0)
+                                .hint_text("200")
+                                .return_key(None),
+                        );
+                        // Quick-pick combobox for common codes
+                        egui::ComboBox::from_id_salt(format!("op_resp_code_pick_{code}"))
+                            .selected_text("...")
+                            .width(28.0)
+                            .show_ui(ui, |ui| {
+                                for &c in &["200","201","202","204","301","302","400","401",
+                                            "403","404","409","422","429","500","502","503","default"] {
+                                    if ui.selectable_label(buf == c, c).clicked() {
+                                        buf = c.to_string();
+                                    }
+                                }
+                            });
+                        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+                        let enter = r.has_focus()
+                            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                        if (r.lost_focus() || enter) && !buf.trim().is_empty() && buf != *code {
+                            if resp_codes.contains(&buf) {
+                                ui.data_mut(|d| d.insert_temp(buf_id, code.clone()));
+                                ui.label(
+                                    RichText::new("code already in use")
+                                        .color(egui::Color32::from_rgb(220, 80, 80))
+                                        .small(),
+                                );
+                            } else {
+                                rename_resp = Some((code.clone(), buf.clone()));
+                            }
+                        }
+                    });
+
                     ch |= edit_response_ref_or(ui, resp_ref, &format!("op_resp_{code}_inner"));
                     if ui.small_button("🗑 Remove").clicked() {
                         to_remove_resp = Some(code.clone());
@@ -1708,6 +1768,15 @@ fn edit_operation(
     }
     if let Some(code) = to_remove_resp {
         op.responses.shift_remove(&code);
+        ch = true;
+    }
+    if let Some((old_code, new_code)) = rename_resp {
+        let reordered: Vec<(String, RefOr<Response>)> = std::mem::take(&mut op.responses)
+            .into_iter()
+            .map(|(k, v)| if k == old_code { (new_code.clone(), v) } else { (k, v) })
+            .collect();
+        op.responses = reordered.into_iter().collect();
+        ui.data_mut(|d| d.remove::<String>(egui::Id::new(format!("op_resp_code_buf_{old_code}"))));
         ch = true;
     }
 
@@ -1747,6 +1816,51 @@ fn edit_operation(
             });
         }
     });
+
+    // Add $ref response
+    let resp_refs: Vec<String> = ui.data(|d| d.get_temp(egui::Id::new("oa_resp_refs")).unwrap_or_default());
+    if !resp_refs.is_empty() {
+        ui.horizontal(|ui| {
+            let mut ref_code: String = ui.data(|d| {
+                d.get_temp(egui::Id::new("oa_new_resp_ref_code")).unwrap_or_else(|| "200".to_string())
+            });
+            egui::ComboBox::from_id_salt("op_new_resp_ref_code_pick")
+                .selected_text(ref_code.clone())
+                .width(80.0)
+                .show_ui(ui, |ui| {
+                    for &code in &["200","201","204","400","401","403","404","422","500","default"] {
+                        if ui.selectable_label(ref_code == code, code).clicked() {
+                            ref_code = code.to_string();
+                        }
+                    }
+                });
+            ui.data_mut(|d| d.insert_temp(egui::Id::new("oa_new_resp_ref_code"), ref_code.clone()));
+
+            let cur = new_item.response_name.clone();
+            let sel_name = resp_refs.iter().find(|p| **p == cur)
+                .and_then(|p| p.split('/').last()).unwrap_or("pick ref…");
+            egui::ComboBox::from_id_salt("op_new_resp_ref_pick")
+                .selected_text(sel_name)
+                .show_ui(ui, |ui| {
+                    for ref_path in &resp_refs {
+                        let name = ref_path.split('/').last().unwrap_or(ref_path.as_str());
+                        if ui.selectable_label(cur == *ref_path, name).clicked() {
+                            new_item.response_name = ref_path.clone();
+                        }
+                    }
+                });
+
+            let already = op.responses.contains_key(&ref_code);
+            ui.add_enabled_ui(!already && !new_item.response_name.is_empty(), |ui| {
+                if ui.small_button("+ Add $ref").clicked() {
+                    let ref_path = new_item.response_name.clone();
+                    new_item.response_name.clear();
+                    op.responses.insert(ref_code, RefOr::Ref(Ref { ref_: ref_path, ..Default::default() }));
+                    ch = true;
+                }
+            });
+        });
+    }
 
     ch
 }
@@ -2160,13 +2274,72 @@ fn edit_media_type(ui: &mut Ui, media: &mut MediaType, id: &str) -> bool {
 // ── Response editor ───────────────────────────────────────────────────────────
 
 fn edit_response_ref_or(ui: &mut Ui, resp: &mut RefOr<Response>, id: &str) -> bool {
+    let mut ch = false;
+    let mut convert_to_ref: Option<String> = None;
+    let mut convert_to_inline = false;
+
     match resp {
         RefOr::Ref(r) => {
-            ui.label(format!("$ref: {}", r.ref_));
-            false
+            let mut ref_val = Some(r.ref_.clone());
+            let pick_ch = ui.horizontal(|ui| {
+                ui.label("$ref:");
+                ref_picker(
+                    ui,
+                    &mut ref_val,
+                    egui::Id::new(format!("{id}_combo")),
+                    egui::Id::new("oa_resp_refs"),
+                )
+            }).inner;
+            if pick_ch {
+                if let Some(v) = ref_val {
+                    r.ref_ = v;
+                }
+                ch = true;
+            }
+            if ui.small_button("Convert to inline").clicked() {
+                convert_to_inline = true;
+            }
         }
-        RefOr::Item(r) => edit_response_item(ui, r, id),
+        RefOr::Item(r) => {
+            let resp_refs: Vec<String> =
+                ui.data(|d| d.get_temp(egui::Id::new("oa_resp_refs")).unwrap_or_default());
+            if !resp_refs.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Use component $ref:").small());
+                    egui::ComboBox::from_id_salt(format!("{id}_to_ref"))
+                        .selected_text("— inline —")
+                        .show_ui(ui, |ui| {
+                            for ref_path in &resp_refs {
+                                let name = ref_path.split('/').last().unwrap_or(ref_path.as_str());
+                                if ui.selectable_label(false, name).clicked() {
+                                    convert_to_ref = Some(ref_path.clone());
+                                }
+                            }
+                        });
+                });
+            }
+            ch |= edit_response_item(ui, r, id);
+        }
     }
+
+    if let Some(ref_path) = convert_to_ref {
+        *resp = RefOr::Ref(Ref { ref_: ref_path, ..Default::default() });
+        ch = true;
+    }
+    if convert_to_inline {
+        let name = if let RefOr::Ref(r) = &*resp {
+            r.ref_.split('/').last().unwrap_or("").to_string()
+        } else {
+            String::new()
+        };
+        *resp = RefOr::Item(Response {
+            description: name,
+            ..Default::default()
+        });
+        ch = true;
+    }
+
+    ch
 }
 
 fn edit_response_item(ui: &mut Ui, resp: &mut Response, id: &str) -> bool {
