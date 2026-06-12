@@ -2665,12 +2665,19 @@ fn edit_schema_regular(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32) -
         egui::ComboBox::from_id_salt(format!("{id}__type"))
             .selected_text(type_str.as_str())
             .show_ui(ui, |ui| {
-                for t in ["", "string", "number", "integer", "boolean", "array", "object", "null"] {
+                for t in ["", "string", "number", "integer", "boolean", "array", "object", "null", "$ref"] {
                     if ui.selectable_label(type_str == t, t).clicked() { type_str = t.to_string(); c = true; }
                 }
             });
         ui.end_row();
-        if c { schema.set_type_str(&type_str); }
+        if c {
+            if type_str == "$ref" {
+                schema.set_type_str("");
+                schema.ref_ = Some(String::new());
+            } else {
+                schema.set_type_str(&type_str);
+            }
+        }
         ui.label("Format:");
         let cur_fmt = schema.format.clone().unwrap_or_default();
         egui::ComboBox::from_id_salt(format!("{id}__fmt"))
@@ -2690,6 +2697,10 @@ fn edit_schema_regular(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32) -
         c |= row_opt_bool(ui, "Deprecated:", &mut schema.deprecated);
         c
     });
+
+    if schema.ref_.is_some() {
+        return ch;
+    }
 
     let type_str = schema.type_str().to_string();
 
