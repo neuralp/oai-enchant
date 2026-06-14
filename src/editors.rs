@@ -2220,26 +2220,123 @@ fn edit_media_type(ui: &mut Ui, media: &mut MediaType, id: &str) -> bool {
 
     let ex_keys: Vec<String> = media.examples.keys().cloned().collect();
     let mut to_remove_ex: Option<String> = None;
+    let mut to_rename_ex: Option<(String, String)> = None;
+
     for ex_key in &ex_keys {
-        ui.horizontal(|ui| {
-            if ui.small_button("🗑").clicked() { to_remove_ex = Some(ex_key.clone()); }
-            ui.label(RichText::new(ex_key).monospace());
-            if let Some(ex_val) = media.examples.get(ex_key) {
-                match ex_val {
+        let header_label = match media.examples.get(ex_key) {
+            Some(RefOr::Ref(r)) => {
+                let short = r.ref_.split('/').last().unwrap_or(ex_key.as_str());
+                format!("{ex_key}  → {short}")
+            }
+            _ => ex_key.clone(),
+        };
+        egui::CollapsingHeader::new(header_label.as_str())
+            .id_salt(format!("{id}_ex_{ex_key}"))
+            .show(ui, |ui| {
+                // Key name editor
+                let key_buf_id = egui::Id::new(format!("{id}_ex_{ex_key}_key"));
+                let mut key_buf: String = ui.data(|d| d.get_temp(key_buf_id).unwrap_or_else(|| ex_key.clone()));
+                ui.horizontal(|ui| {
+                    ui.label("Key:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut key_buf)
+                            .desired_width(f32::INFINITY)
+                            .return_key(None),
+                    );
+                    ui.data_mut(|d| d.insert_temp(key_buf_id, key_buf.clone()));
+                    let enter = resp.has_focus()
+                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                    if (resp.lost_focus() || enter)
+                        && !key_buf.is_empty()
+                        && key_buf != *ex_key
+                        && !media.examples.contains_key(&key_buf)
+                    {
+                        to_rename_ex = Some((ex_key.clone(), key_buf.clone()));
+                    }
+                });
+
+                match media.examples.get_mut(ex_key).unwrap() {
                     RefOr::Ref(r) => {
-                        let short = r.ref_.split('/').last().unwrap_or(&r.ref_);
+                        let short = r.ref_.split('/').last().unwrap_or(r.ref_.as_str()).to_string();
                         ui.label(RichText::new(format!("→ {short}")).weak());
                     }
-                    RefOr::Item(_) => { ui.label(RichText::new("(inline)").weak()); }
-                }
-            }
-        });
-    }
-    if let Some(k) = to_remove_ex { media.examples.shift_remove(&k); ch = true; }
+                    RefOr::Item(example) => {
+                        // Summary
+                        ui.horizontal(|ui| {
+                            ui.label("Summary:");
+                            let mut s = example.summary.clone().unwrap_or_default();
+                            if ui.add(
+                                egui::TextEdit::singleline(&mut s)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("brief label"),
+                            ).changed() {
+                                example.summary = if s.is_empty() { None } else { Some(s) };
+                                ch = true;
+                            }
+                        });
 
-    // Add a reference to a component example
-    if !example_refs.is_empty() {
-        ui.horizontal(|ui| {
+                        // Value JSON — persistent buffer so mid-edit invalid JSON doesn't snap back
+                        let buf_id   = egui::Id::new(format!("{id}_ex_{ex_key}_vbuf"));
+                        let track_id = egui::Id::new(format!("{id}_ex_{ex_key}_vtrack"));
+                        let tracked: String = ui.data(|d| d.get_temp(track_id).unwrap_or_default());
+                        if tracked != *ex_key {
+                            let initial = example.value.as_ref()
+                                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                                .unwrap_or_default();
+                            ui.data_mut(|d| {
+                                d.insert_temp(track_id, ex_key.clone());
+                                d.insert_temp(buf_id, initial);
+                            });
+                        }
+                        let mut vbuf: String = ui.data(|d| d.get_temp(buf_id).unwrap_or_default());
+                        ui.label(RichText::new("Value (JSON):").small().weak());
+                        let resp = ui.add(
+                            egui::TextEdit::multiline(&mut vbuf)
+                                .desired_rows(4)
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.data_mut(|d| d.insert_temp(buf_id, vbuf.clone()));
+                        if resp.changed() {
+                            if vbuf.trim().is_empty() {
+                                example.value = None;
+                                ch = true;
+                            } else if let Ok(v) = serde_json::from_str::<Value>(&vbuf) {
+                                example.value = Some(v);
+                                ch = true;
+                            }
+                        }
+                    }
+                }
+
+                if ui.small_button("🗑 Remove").clicked() {
+                    to_remove_ex = Some(ex_key.clone());
+                }
+            });
+    }
+
+    if let Some(k) = to_remove_ex { media.examples.shift_remove(&k); ch = true; }
+    if let Some((old, new)) = to_rename_ex {
+        let reordered: Vec<(String, RefOr<OaExample>)> = std::mem::take(&mut media.examples)
+            .into_iter()
+            .map(|(k, v)| if k == old { (new.clone(), v) } else { (k, v) })
+            .collect();
+        media.examples = reordered.into_iter().collect();
+        ch = true;
+    }
+
+    // Add buttons
+    ui.horizontal(|ui| {
+        if ui.small_button("+ Inline").clicked() {
+            let base = "example";
+            let mut n = 1u32;
+            let mut key = base.to_string();
+            while media.examples.contains_key(&key) { n += 1; key = format!("{base}{n}"); }
+            media.examples.insert(key, RefOr::Item(OaExample::default()));
+            ch = true;
+        }
+
+        if !example_refs.is_empty() {
             let key_id = egui::Id::new(format!("{id}_ex_key"));
             let ref_id = egui::Id::new(format!("{id}_ex_ref"));
             let mut key: String = ui.data(|d| d.get_temp(key_id).unwrap_or_default());
@@ -2265,8 +2362,8 @@ fn edit_media_type(ui: &mut Ui, media: &mut MediaType, id: &str) -> bool {
                 ui.data_mut(|d| { d.insert_temp(key_id, String::new()); d.insert_temp(ref_id, String::new()); });
                 ch = true;
             }
-        });
-    }
+        }
+    });
 
     ch
 }
@@ -2754,19 +2851,44 @@ fn edit_schema_regular(ui: &mut Ui, schema: &mut Schema, id: &str, depth: u32) -
     }
 
     // Enum values
-    section_header(ui, "Enum Values");
-    let mut enum_str = schema.enum_.as_deref()
-        .map(|vals| vals.iter().map(|v| serde_json::to_string(v).unwrap_or_default()).collect::<Vec<_>>().join("\n"))
-        .unwrap_or_default();
-    ui.label(RichText::new("One JSON value per line (blank = no enum restriction):").weak().small());
-    if ui.add(egui::TextEdit::multiline(&mut enum_str).desired_rows(3).desired_width(f32::INFINITY)).changed() {
-        let vals: Vec<Value> = enum_str.lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        schema.enum_ = if vals.is_empty() { None } else { Some(vals) };
-        ch = true;
-    }
+    let has_enum = schema.enum_.is_some();
+    egui::CollapsingHeader::new("Enum Values")
+        .id_salt(format!("{id}__enum"))
+        .default_open(has_enum)
+        .show(ui, |ui| {
+            let count = schema.enum_.as_ref().map_or(0, |v| v.len());
+            let mut remove_idx: Option<usize> = None;
+            for i in 0..count {
+                ui.horizontal(|ui| {
+                    if ui.small_button("🗑").clicked() {
+                        remove_idx = Some(i);
+                    }
+                    let mut s = {
+                        let val = &schema.enum_.as_ref().unwrap()[i];
+                        match val {
+                            serde_json::Value::String(sv) => sv.clone(),
+                            other => serde_json::to_string(other).unwrap_or_default(),
+                        }
+                    };
+                    if ui.add(egui::TextEdit::singleline(&mut s).desired_width(f32::INFINITY)).changed() {
+                        schema.enum_.as_mut().unwrap()[i] = serde_json::Value::String(s);
+                        ch = true;
+                    }
+                });
+            }
+            if let Some(idx) = remove_idx {
+                let vals = schema.enum_.as_mut().unwrap();
+                vals.remove(idx);
+                if vals.is_empty() {
+                    schema.enum_ = None;
+                }
+                ch = true;
+            }
+            if ui.small_button("+ Add").clicked() {
+                schema.enum_.get_or_insert_with(Vec::new).push(serde_json::Value::String(String::new()));
+                ch = true;
+            }
+        });
 
     ch
 }
