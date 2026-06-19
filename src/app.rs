@@ -290,6 +290,112 @@ fn sync_section_key_order(raw: &mut serde_yaml::Value, updated: &serde_yaml::Val
     sync_key_order(r, u);
 }
 
+// ── Composition pruning ───────────────────────────────────────────────────────
+
+/// Returns true if a composition entry (allOf/anyOf/oneOf item) contributes nothing.
+/// Specifically catches bare `- type: object` with no properties or constraints,
+/// which triggers "allOf schema containing multiple types" warnings in openapi-generator.
+/// Entries with a $ref, properties, or any real constraint are always kept.
+fn is_empty_composition_entry(s: &Schema) -> bool {
+    // Keep any entry that carries a $ref.
+    if s.ref_.is_some() { return false; }
+    // Only consider bare objects (type: object or no type) as candidates for pruning.
+    let type_trivial = matches!(
+        s.type_.as_ref().and_then(|v| v.as_str()),
+        None | Some("object")
+    );
+    type_trivial
+        && s.title.is_none()
+        && s.description.is_none()
+        && s.properties.is_empty()
+        && s.required.is_empty()
+        && s.enum_.is_none()
+        && s.items.is_none()
+        && s.all_of.is_empty()
+        && s.any_of.is_empty()
+        && s.one_of.is_empty()
+        && s.additional_properties.is_none()
+        && s.min_length.is_none()
+        && s.max_length.is_none()
+        && s.pattern.is_none()
+        && s.minimum.is_none()
+        && s.maximum.is_none()
+        && s.exclusive_minimum.is_none()
+        && s.exclusive_maximum.is_none()
+        && s.multiple_of.is_none()
+        && s.min_items.is_none()
+        && s.max_items.is_none()
+        && s.min_properties.is_none()
+        && s.max_properties.is_none()
+        && s.unique_items.is_none()
+        && s.format.is_none()
+        && s.nullable.is_none()
+        && s.default.is_none()
+        && s.example.is_none()
+        && s.discriminator.is_none()
+        && s.read_only.is_none()
+        && s.write_only.is_none()
+        && s.deprecated.is_none()
+        && s.external_docs.is_none()
+        && s.if_.is_none()
+        && s.then_.is_none()
+        && s.else_.is_none()
+        && s.not.is_none()
+        && s.defs.is_empty()
+        && s.prefix_items.is_empty()
+}
+
+fn prune_schema(s: &mut Schema) {
+    s.all_of.retain(|e| !is_empty_composition_entry(e));
+    s.any_of.retain(|e| !is_empty_composition_entry(e));
+    s.one_of.retain(|e| !is_empty_composition_entry(e));
+    for e in &mut s.all_of { prune_schema(e); }
+    for e in &mut s.any_of { prune_schema(e); }
+    for e in &mut s.one_of { prune_schema(e); }
+    for p in s.properties.values_mut() { prune_schema(p); }
+    if let Some(items) = &mut s.items { prune_schema(items); }
+    if let Some(not) = &mut s.not { prune_schema(not); }
+    for p in &mut s.prefix_items { prune_schema(p); }
+    if let Some(v) = &mut s.if_ { prune_schema(v); }
+    if let Some(v) = &mut s.then_ { prune_schema(v); }
+    if let Some(v) = &mut s.else_ { prune_schema(v); }
+    for v in s.defs.values_mut() { prune_schema(v); }
+}
+
+fn prune_spec(spec: &mut OpenApiSpec) {
+    if let Some(comps) = &mut spec.components {
+        for s in comps.schemas.values_mut() {
+            if let crate::model::RefOr::Item(s) = s { prune_schema(s); }
+        }
+    }
+    for path_item in spec.paths.values_mut() {
+        for op in [
+            &mut path_item.get, &mut path_item.put, &mut path_item.post,
+            &mut path_item.delete, &mut path_item.options, &mut path_item.head,
+            &mut path_item.patch, &mut path_item.trace,
+        ] {
+            let Some(op) = op else { continue };
+            if let Some(crate::model::RefOr::Item(rb)) = &mut op.request_body {
+                for mt in rb.content.values_mut() {
+                    if let Some(crate::model::RefOr::Item(s)) = &mut mt.schema { prune_schema(s); }
+                }
+            }
+            for resp in op.responses.values_mut() {
+                if let crate::model::RefOr::Item(resp) = resp {
+                    for mt in resp.content.values_mut() {
+                        if let Some(crate::model::RefOr::Item(s)) = &mut mt.schema { prune_schema(s); }
+                    }
+                }
+            }
+            for param in &mut op.parameters {
+                if let crate::model::RefOr::Item(p) = param {
+                    if let Some(crate::model::RefOr::Item(s)) = &mut p.schema { prune_schema(s); }
+                }
+            }
+        }
+    }
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -452,7 +558,12 @@ impl App {
         }
     }
 
-    fn write_spec(&mut self, spec: OpenApiSpec, path: &PathBuf, fmt: FileFormat) {
+    fn write_spec(&mut self, mut spec: OpenApiSpec, path: &PathBuf, fmt: FileFormat) {
+        // Remove empty composition entries (e.g. bare `- type: object` in allOf with no
+        // properties) that cause "allOf schema containing multiple types" warnings in
+        // openapi-generator and similar tools.
+        prune_spec(&mut spec);
+
         // Serialize the typed struct to a value tree.
         let mut updated = match serde_yaml::to_value(&spec) {
             Ok(v) => v,
