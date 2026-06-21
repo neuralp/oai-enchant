@@ -1810,6 +1810,10 @@ fn edit_operation(
                         description: desc.to_string(),
                         ..Default::default()
                     }));
+                    op.responses.sort_by(|a, _, b, _| {
+                        let key = |s: &str| s.parse::<u16>().unwrap_or(u16::MAX);
+                        key(a).cmp(&key(b))
+                    });
                     ch = true;
                     ui.close_menu();
                 }
@@ -1856,6 +1860,10 @@ fn edit_operation(
                     let ref_path = new_item.response_name.clone();
                     new_item.response_name.clear();
                     op.responses.insert(ref_code, RefOr::Ref(Ref { ref_: ref_path, ..Default::default() }));
+                    op.responses.sort_by(|a, _, b, _| {
+                        let key = |s: &str| s.parse::<u16>().unwrap_or(u16::MAX);
+                        key(a).cmp(&key(b))
+                    });
                     ch = true;
                 }
             });
@@ -2473,6 +2481,16 @@ fn edit_response_item(ui: &mut Ui, resp: &mut Response, id: &str) -> bool {
             ("application/xml",        false),
             ("application/octet-stream", false),
             ("application/pdf",        false),
+            ("image/png",              false),
+            ("image/jpeg",             false),
+            ("image/gif",              false),
+            ("image/webp",             false),
+            ("image/svg+xml",          false),
+            ("image/avif",             false),
+            ("image/tiff",             false),
+            ("image/bmp",              false),
+            ("image/ico",              false),
+            ("image/*",                false),
         ] {
             let already = resp.content.contains_key(ct);
             ui.add_enabled_ui(!already, |ui| {
