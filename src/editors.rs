@@ -3345,12 +3345,18 @@ fn edit_schema_properties_flat(ui: &mut Ui, schema: &mut Schema, id: &str, depth
         ch = true;
     }
     if let Some((old, new_name)) = rename_op {
-        if let Some(val) = schema.properties.shift_remove(&old) {
-            schema.properties.insert(new_name.clone(), val);
-            if let Some(pos) = schema.required.iter().position(|r| r == &old) {
-                schema.required[pos] = new_name;
+        if let Some(idx) = schema.properties.get_index_of(&old) {
+            if let Some(val) = schema.properties.shift_remove(&old) {
+                schema.properties.shift_insert(idx, new_name.clone(), val);
+                if let Some(pos) = schema.required.iter().position(|r| r == &old) {
+                    schema.required[pos] = new_name.clone();
+                }
+                // Discard the orphaned in-progress edit buffer keyed to the old name.
+                ui.data_mut(|d| {
+                    d.remove_temp::<String>(egui::Id::new(format!("{id}__pname__{old}")))
+                });
+                ch = true;
             }
-            ch = true;
         }
     }
     if let Some((from, to)) = reorder_op {
